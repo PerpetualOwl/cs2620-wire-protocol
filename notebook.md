@@ -1,6 +1,8 @@
 # Engineering Notebook
 
-### 2/5/25
+## 2/5/25
+
+### Update 1
 Made the repo and makefile along with basic structural planning.
 
 I think we want to do client and server in separate files that run on separate terminals and some shared utils for example which contain functions for serializing and deserializing the wire protocol and potentially encryption of some type maybe to protect passwords.
@@ -11,3 +13,10 @@ Not going to bother with a database, since it doesn't have to persist, we can ju
 
 Use a giant lock on the "storage" structure to enforce concurrency. We'll use python threading to accept multiple client connections at the same time (there are also locks/mutexes in this library). 
 
+### Update 2
+Just wrote a bunch of helper functions in utils
+
+### Update 3
+Started working on client. so the way it handles stuff
+1. it constantly waits for inputs from users. When it receives a command, it does the requested action by the user and sends off a packet to the server
+2. it constantly waits for packets from the server
