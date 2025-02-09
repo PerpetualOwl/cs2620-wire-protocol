@@ -3,9 +3,12 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization
 from typing import Optional, List, Union
-from pydantic import BaseModel, validator
 from enum import Enum
+from pydantic import BaseModel, model_validator, validator
 from datetime import datetime
+
+SERVER_IP = "127.0.0.1"
+SERVER_PORT = 33256
 
 class MessageType(str, Enum):
     REQUEST_PUBLIC_KEY = "request_public_key"
@@ -17,6 +20,7 @@ class MessageType(str, Enum):
     DELETE_ACCOUNT = "delete_account"
     MESSAGE_RECEIVED = "message_received"
     MESSAGE_DELETED = "message_deleted"
+    USER_ADDED = "user_added"
     USER_DELETED = "user_deleted"
     CREATE_USER_REQUEST = "create_user_request"
     CREATE_USER_RESPONSE = "create_user_response"
@@ -36,8 +40,8 @@ class ClientPacket(BaseModel):
             MessageType.REQUEST_PUBLIC_KEY: [],
             MessageType.REQUEST_MESSAGES: ["sender", "password"],
             MessageType.SEND_MESSAGE: ["sender", "recipient", "message", "password"],
-            MessageType.DELETE_MESSAGE: ["message_id", "password"], # or sender and recipient
-            MessageType.DELETE_ACCOUNT: ["password"],
+            MessageType.DELETE_MESSAGE: ["username", "message_id", "password"], # or sender and recipient
+            MessageType.DELETE_ACCOUNT: ["username", "password"],
             MessageType.CREATE_USER_REQUEST: ["username", "password"],
         }
 
@@ -62,8 +66,9 @@ class ServerPacket(BaseModel):
             MessageType.PUBLIC_KEY_RESPONSE: ["public_key"],
             MessageType.MESSAGE_RECEIVED: ["message_id", "recipient"],
             MessageType.MESSAGE_DELETED: ["message_id"],
+            MessageType.USER_ADDED: ["username"],
             MessageType.USER_DELETED: ["username"],
-            MessageType.CREATE_USER_RESPONSE: ["success", "message"],  # Add success flag and message
+            MessageType.CREATE_USER_RESPONSE: ["success", "message"],
             MessageType.ALL_MESSAGES: ["messages"],
         }
 
@@ -81,29 +86,101 @@ class ChatMessage(BaseModel):
     timestamp: datetime = datetime.now()
     message_id: str # unique ID
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_datetime(cls, data):
+        if isinstance(data, dict) and "my_datetime" in data and isinstance(data["my_datetime"], str):
+            try:
+                data["my_datetime"] = datetime.fromisoformat(data["my_datetime"].replace("Z", "+00:00")) # Handle Z timezone
+            except ValueError:
+                raise ValueError("Invalid datetime format")
+        return data
+    
+    def model_dump(self, *args, **kwargs):
+        original_dict = super().model_dump(*args, **kwargs)  # Get the original dict
+        def convert_sets_to_lists(obj):
+            if isinstance(obj, set):
+                return list(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_sets_to_lists(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_sets_to_lists(elem) for elem in obj]
+            elif isinstance(obj, datetime):
+                return obj.isoformat()
+            return obj
+        return convert_sets_to_lists(original_dict)
+
 class ChatData(BaseModel):
-    users: set[str] = []
+    users: set[str] = set()
     messages: dict[str, ChatMessage] = {}
     message_id_by_user: dict[str, set[str]] = {}
 
-    def add_message(self, message: ChatMessage):
-        self.messages[message.message_id] = message
+    def get_messages(self, username: str) -> "ChatData":
+        messages = {id: msg for id, msg in self.messages.items() if msg.sender == username or msg.recipient == username}
+        return ChatData(users=self.users, messages=messages, message_id_by_user=self.message_id_by_user)
 
-    def delete_message(self, message_id: str):
-        if message_id not in self.messages:
-            return
+    def add_user(self, username: str):
+        self.users.add(username)
+        self.message_id_by_user[username] = set()
+        return True
+
+    def add_message(self, message: ChatMessage):
+        if message.sender not in self.users or message.recipient not in self.users:
+            self.users.add(message.sender)
+            self.users.add(message.recipient)
+        self.messages[message.message_id] = message
+        
+        if message.sender not in self.message_id_by_user:
+            self.message_id_by_user[message.sender] = set()
+        if message.recipient not in self.message_id_by_user:
+            self.message_id_by_user[message.recipient] = set()
+
+        self.message_id_by_user[message.sender].add(message.message_id)
+        self.message_id_by_user[message.recipient].add(message.message_id)
+        return True
+
+    def delete_message(self, sender: str, message_id: str):
+        if (message_id not in self.messages
+            or message_id not in self.message_id_by_user[sender]):
+            return False
         else:
             msg = self.messages.pop(message_id)
             self.message_id_by_user[msg.sender].remove(message_id)
             self.message_id_by_user[msg.recipient].remove(message_id)
+            return True
 
     def delete_user(self, username: str):
         if username not in self.users:
-            return
+            return False
         self.users.remove(username)
         for id in self.message_id_by_user[username]:
             self.messages.pop(id)
         self.message_id_by_user.pop(username)
+        return True
+    
+    @model_validator(mode="before")
+    @classmethod
+    def parse_datetime(cls, data):
+        if isinstance(data, dict) and "my_datetime" in data and isinstance(data["my_datetime"], str):
+            try:
+                data["my_datetime"] = datetime.fromisoformat(data["my_datetime"].replace("Z", "+00:00")) # Handle Z timezone
+            except ValueError:
+                raise ValueError("Invalid datetime format")
+        return data
+    
+    def model_dump(self, *args, **kwargs):
+        original_dict = super().model_dump(*args, **kwargs)  # Get the original dict
+        def convert_sets_to_lists(obj):
+            if isinstance(obj, set):
+                return list(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_sets_to_lists(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_sets_to_lists(elem) for elem in obj]
+            elif isinstance(obj, datetime):
+                return obj.isoformat()
+            return obj
+        return convert_sets_to_lists(original_dict)
 
 def hash_password(password : str) -> str:
     """
@@ -144,7 +221,7 @@ def generate_key_pair() -> tuple[bytes, bytes]:
     )
     return private_pem, public_pem
 
-def encrypt(public_pem : bytes, message : str) -> bytes:
+def encrypt(public_pem : bytes, message : bytes) -> bytes:
     """
     Encrypts a message using a public key.
 
@@ -158,7 +235,7 @@ def encrypt(public_pem : bytes, message : str) -> bytes:
     public_key = serialization.load_pem_public_key(public_pem)
 
     ciphertext = public_key.encrypt(
-        message.encode('utf-8'),
+        message,
         padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
@@ -176,7 +253,7 @@ def decrypt(private_pem : bytes, ciphertext : bytes) -> str:
         ciphertext: The ciphertext to decrypt.
 
     Returns:
-        The decrypted plaintext as a string.
+        The decrypted plaintext as bytes.
     """
     private_key = serialization.load_pem_private_key(private_pem, password=None)
 
@@ -188,7 +265,7 @@ def decrypt(private_pem : bytes, ciphertext : bytes) -> str:
             label=None
         )
     )
-    return plaintext.decode('utf-8')
+    return plaintext
 
 def serialize_packet(packet: Union[ClientPacket, ServerPacket]) -> bytes:
     """Serializes a ClientPacket or ServerPacket to JSON and then bytes."""

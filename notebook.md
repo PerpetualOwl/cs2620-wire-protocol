@@ -20,3 +20,9 @@ Just wrote a bunch of helper functions in utils
 Started working on client. so the way it handles stuff
 1. it constantly waits for inputs from users. When it receives a command, it does the requested action by the user and sends off a packet to the server
 2. it constantly waits for packets from the server
+
+## 2/9/25
+
+Fixed lots of messaging related bugs and ironed out the packet passing models.
+
+going to add unit tests next

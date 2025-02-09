@@ -13,6 +13,13 @@ password = None
 logged_in = False
 login_failed = False
 
+def print_thread(text: str) -> None:
+    print("\033[F", end="", flush=True)  # Move cursor up one line
+    print("\033[K", end="", flush=True) # Clear the current line
+    print(text, flush=True)
+    print("\033[E", end="", flush=True) # Move cursor to the beginning of the next line
+
+
 def process_server_message(data: bytes) -> None:
     """Processes data received from the server."""
     global SERVER_PUBLIC_KEY, chat_data, logged_in, login_failed
@@ -21,47 +28,55 @@ def process_server_message(data: bytes) -> None:
         match packet.type:
             case MessageType.PUBLIC_KEY_RESPONSE:
                 SERVER_PUBLIC_KEY = packet.data["public_key"].encode("utf-8")
-                print("Received server public key.")
+                print_thread("Received server public key.")
             case MessageType.MESSAGE_RECEIVED:
                 message_data = packet.data
                 message = ChatMessage(**message_data)  # Create ChatMessage object
                 chat_data.add_message(message)
-                print(f"New message received from {message.sender}: {message.message}")
+                print_thread(f"New message received from {message.sender}: {message.message}")
             case MessageType.MESSAGE_DELETED:
                 message_id = packet.data["message_id"]
                 chat_data.delete_message(message_id)
-                print(f"Message deleted: {message_id}")
+                print_thread(f"Message deleted: {message_id}")
+            case MessageType.USER_ADDED:
+                username = packet.data["username"]
+                chat_data.add_user(username)
+                print_thread(f"User added: {username}")
             case MessageType.USER_DELETED:
                 username = packet.data["username"]
                 chat_data.delete_user(username)
-                print(f"User deleted: {username}")
+                print_thread(f"User deleted: {username}")
             case MessageType.CREATE_USER_RESPONSE:
                 logged_in = packet.data["success"]
                 message = packet.data["message"]
                 if logged_in:
-                    print(f"User created/login successful: {message}")
+                    print_thread(f"User created/login successful: {message}")
                 else:
                     login_failed = True
-                    print(f"Failed to create user: {message}")
+                    print_thread(f"Failed to create user: {message}")
+            case MessageType.ALL_MESSAGES:
+                messages = packet.data["messages"]
+                chat_data = ChatData(**messages)
+                print_thread("All messages loaded.")
+                print_thread(chat_data)
             case _:
-                print(f"Received unknown message type: {packet.type}")
+                print_thread(f"Received unknown message type: {packet.type}")
     except Exception as e:
-        print(f"Error processing server message: {e}")
+        print_thread(f"Error processing server message: {e}")
 
 def send_packet_to_server(packet: ClientPacket) -> None:
     """Sends a packet to the server."""
     try:
         if SERVER_PUBLIC_KEY is not None:
-            # data: bytes = encrypt(serialize_packet(packet), SERVER_PUBLIC_KEY)
-            data: bytes = serialize_packet(packet)
+            data: bytes = encrypt(SERVER_PUBLIC_KEY, serialize_packet(packet))
         elif packet.type == MessageType.REQUEST_PUBLIC_KEY:
             data: bytes = serialize_packet(packet)
         else:
-            print("Server public key not available. Cannot send packet.")
+            print_thread("Server public key not available. Cannot send packet.")
             return
         client_socket.sendall(data)
     except Exception as e:
-        print(f"Error sending packet: {e}")
+        print_thread(f"Error sending packet: {e}")
         sys.exit(1)
 
 
@@ -72,19 +87,23 @@ def handle_user_input() -> None:
     while (username is None or password is None) and not logged_in:  # Force login/registration
         username = input("Username: ")
         password = input("Password: ")
+
+        # hash password immediately, and discard the original
+        password = hash_password(password)
+
         packet = ClientPacket(type=MessageType.CREATE_USER_REQUEST, data={"username": username, "password": password})
         send_packet_to_server(packet)
-        print("Login/Registration attempt sent. Waiting for server response...")
+        print_thread("Login/Registration attempt sent. Waiting for server response...")
         while not logged_in and not login_failed:
             pass
         if login_failed:
-            print("Login/Registration failed. Try again.")
+            print_thread("Login/Registration failed. Try again.")
             username = None
             password = None
             logged_in = False
             login_failed = False
         else:
-            print("Logged in successfully.")
+            print_thread("Logged in successfully.")
             break
 
     # load all messages
@@ -99,7 +118,7 @@ def handle_user_input() -> None:
 
             if command == "send":
                 if len(parts) < 3:
-                    print("Usage: send <recipient> <message>")
+                    print_thread("Usage: send <recipient> <message>")
                 else:
                     recipient = parts[1]
                     message = " ".join(parts[2:])  # Join the rest as the message
@@ -107,15 +126,15 @@ def handle_user_input() -> None:
                     send_packet_to_server(packet)
             elif command == "delete":
                 if len(parts) != 2:
-                    print("Usage: delete <message_id>")
+                    print_thread("Usage: delete <message_id>")
                 else:
                     message_id = parts[1]
-                    packet = ClientPacket(type=MessageType.DELETE_MESSAGE, data={"message_id": message_id, "password": password})
+                    packet = ClientPacket(type=MessageType.DELETE_MESSAGE, data={"username": username, "message_id": message_id, "password": password})
                     send_packet_to_server(packet)
             elif command == "delete_account":
-                packet = ClientPacket(type=MessageType.DELETE_ACCOUNT, data={"password": password})
+                packet = ClientPacket(type=MessageType.DELETE_ACCOUNT, data={"username": username, "password": password})
                 send_packet_to_server(packet)
-                print("Account deleted.")
+                print_thread("Account deleted.")
                 break
             elif command == "request_messages":
                 packet = ClientPacket(type=MessageType.REQUEST_MESSAGES, data = {"sender": username, "password": password})
@@ -123,13 +142,13 @@ def handle_user_input() -> None:
             elif command == "exit":
                 break # Exit the loop and close the connection
             else:
-                print("Invalid command.")
+                print_thread("Invalid command.")
 
         except EOFError:
-            print("EOF (Ctrl+D) received. Exiting.")
+            print_thread("EOF (Ctrl+D) received. Exiting.")
             break
         except Exception as e:
-            print(f"Error processing input: {e}")
+            print_thread(f"Error processing input: {e}")
             break
 
     client_socket.close()
@@ -142,17 +161,17 @@ def receive_data() -> None:
         try:
             data: bytes = client_socket.recv(1024)
             if not data:  # Server disconnected
-                print("Server disconnected.")
+                print_thread("Server disconnected.")
                 break
             process_server_message(data)
         except OSError as e:
-            print(f"Socket error: {e}")
+            print_thread(f"Socket error: {e}")
             break
         except Exception as e:
-            print(f"Error receiving data: {e}")
+            print_thread(f"Error receiving data: {e}")
             break
     client_socket.close()
-    sys.exit(0)
+    raise SystemExit(0)
 
 
 def on_startup() -> None:
@@ -165,9 +184,6 @@ def on_startup() -> None:
 
 
 if __name__ == "__main__":
-    SERVER_IP: str = "127.0.0.1"  # Replace with the server's IP address
-    SERVER_PORT: int = 12345  # Replace with the server's port
-
     client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
