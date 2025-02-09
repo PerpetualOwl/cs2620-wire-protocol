@@ -8,7 +8,7 @@ from pydantic import BaseModel, model_validator, validator
 from datetime import datetime
 
 SERVER_IP = "127.0.0.1"
-SERVER_PORT = 33256
+SERVER_PORT = 33257
 
 class MessageType(str, Enum):
     REQUEST_PUBLIC_KEY = "request_public_key"
