@@ -26,3 +26,13 @@ Started working on client. so the way it handles stuff
 Fixed lots of messaging related bugs and ironed out the packet passing models.
 
 going to add unit tests next
+
+added some unit tests for everything in utils
+
+### Update 2
+
+wrote a pyqt5 frontend since tkinter was complaining about my macos version
+has most of the functionality but one or two (deleting messages and self-message propagation still aren't working as well as I would hope)
+Otherwise, it looks pretty good though
+
+Modified makefile to make running all of the commands more easy and also added a way to run the tests
