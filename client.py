@@ -3,6 +3,7 @@ import threading
 import sys
 from typing import Any, Optional, Union, Callable
 from utils import *
+import time
 
 SERVER_PUBLIC_KEY: Optional[bytes] = None
 
@@ -16,10 +17,10 @@ def process_server_message(data: bytes) -> None:
     """Processes data received from the server."""
     global SERVER_PUBLIC_KEY, chat_data, logged_in, login_failed
     try:
-        packet: ServerPacket = deserialize_packet(data)
+        packet: ServerPacket = deserialize_packet(data, ServerPacket)
         match packet.type:
             case MessageType.PUBLIC_KEY_RESPONSE:
-                SERVER_PUBLIC_KEY = packet.data["public_key"]
+                SERVER_PUBLIC_KEY = packet.data["public_key"].encode("utf-8")
                 print("Received server public key.")
             case MessageType.MESSAGE_RECEIVED:
                 message_data = packet.data
@@ -38,7 +39,7 @@ def process_server_message(data: bytes) -> None:
                 logged_in = packet.data["success"]
                 message = packet.data["message"]
                 if logged_in:
-                    print("User created/login successful.")
+                    print(f"User created/login successful: {message}")
                 else:
                     login_failed = True
                     print(f"Failed to create user: {message}")
@@ -51,7 +52,8 @@ def send_packet_to_server(packet: ClientPacket) -> None:
     """Sends a packet to the server."""
     try:
         if SERVER_PUBLIC_KEY is not None:
-            data: bytes = encrypt(serialize_packet(packet), SERVER_PUBLIC_KEY)
+            # data: bytes = encrypt(serialize_packet(packet), SERVER_PUBLIC_KEY)
+            data: bytes = serialize_packet(packet)
         elif packet.type == MessageType.REQUEST_PUBLIC_KEY:
             data: bytes = serialize_packet(packet)
         else:
@@ -66,7 +68,7 @@ def send_packet_to_server(packet: ClientPacket) -> None:
 def handle_user_input() -> None:
     """Handles user input, now with commands."""
     global username, password, logged_in, login_failed
-
+    time.sleep(1)
     while (username is None or password is None) and not logged_in:  # Force login/registration
         username = input("Username: ")
         password = input("Password: ")
@@ -156,7 +158,7 @@ def receive_data() -> None:
 def on_startup() -> None:
     """Function that runs on client startup."""
     try:
-        send_packet_to_server(ServerPacket(MessageType.REQUEST_PUBLIC_KEY))
+        send_packet_to_server(ServerPacket(type=MessageType.REQUEST_PUBLIC_KEY))
     except Exception as e:
         print(f"Error on startup: {e}")
         sys.exit(1)

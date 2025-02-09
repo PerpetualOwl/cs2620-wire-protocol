@@ -10,9 +10,10 @@ client: $(VENV_DIR) $(REQUIREMENTS)
 	$(PYTHON) client.py
 
 $(VENV_DIR):
-	python3 -m venv $(VENV_DIR)
+	python3.12 -m venv $(VENV_DIR)
 
 $(REQUIREMENTS): $(VENV_DIR)
+	python3.12 -m pip install --upgrade pip
 	$(PIP) install -r $(REQUIREMENTS)
 
 help:

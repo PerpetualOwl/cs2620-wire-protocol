@@ -82,18 +82,28 @@ class ChatMessage(BaseModel):
     message_id: str # unique ID
 
 class ChatData(BaseModel):
-    users: List[str] = []
-    messages: List[ChatMessage] = []
+    users: set[str] = []
+    messages: dict[str, ChatMessage] = {}
+    message_id_by_user: dict[str, set[str]] = {}
 
     def add_message(self, message: ChatMessage):
-        self.messages.append(message)
+        self.messages[message.message_id] = message
 
     def delete_message(self, message_id: str):
-        self.messages = [msg for msg in self.messages if msg.message_id != message_id]
+        if message_id not in self.messages:
+            return
+        else:
+            msg = self.messages.pop(message_id)
+            self.message_id_by_user[msg.sender].remove(message_id)
+            self.message_id_by_user[msg.recipient].remove(message_id)
 
     def delete_user(self, username: str):
-        self.users = [user for user in self.users if user != username]
-        self.messages = [msg for msg in self.messages if msg.sender != username and msg.recipient != username]
+        if username not in self.users:
+            return
+        self.users.remove(username)
+        for id in self.message_id_by_user[username]:
+            self.messages.pop(id)
+        self.message_id_by_user.pop(username)
 
 def hash_password(password : str) -> str:
     """
