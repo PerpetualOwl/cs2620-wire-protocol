@@ -36,3 +36,53 @@ has most of the functionality but one or two (deleting messages and self-message
 Otherwise, it looks pretty good though
 
 Modified makefile to make running all of the commands more easy and also added a way to run the tests
+
+## 2/10/25
+Custom Wire Protocol Documentation
+
+Overview:
+  The custom wire protocol is designed for efficient, low‐overhead message transmission.
+  Each packet is composed of a 1‑byte header carrying the “packet type” (represented as a small integer)
+  and a “data” section that contains the packet’s payload encoded in a binary, Type‐Length‐Value (TLV) format.
+
+Overall Packet Format:
+  • 1 byte – Packet Type Code
+      This code (an unsigned byte) is obtained via a mapping from the MessageType (an enum)
+      to an integer (for example, 0 for “request_public_key”, 1 for “public_key_response”, etc.).
+      
+  • Data Section – A TLV-encoded dictionary:
+      The data is encoded as follows:
+        – 1 byte: Number of key/value pairs in the dictionary.
+        – For each key/value pair:
+             • Key:
+                 – 1 byte: Key length (unsigned byte). (Assumes key length less than 256.)
+                 – N bytes: UTF‑8 encoded key string.
+             • Value:
+                 • 1 byte: Type tag (identifies the value’s type):
+                        1 = String
+                        2 = Boolean
+                        3 = Integer
+                        4 = Float (double precision)
+                        5 = Dictionary (recursively encoded, same TLV rules)
+                        6 = List (with one byte for the number of elements, then each element encoded recursively)
+                 • Then a length field and the actual data:
+                        – For TAG_STRING: 2 bytes (unsigned short in network order) for string length followed by the UTF‑8 string.
+                        – For TAG_BOOL: 1 byte (0 = False, 1 = True)
+                        – For TAG_INT: 4 bytes (signed integer, big-endian)
+                        – For TAG_FLOAT: 8 bytes (IEEE‑754 double, big‑endian)
+                        – For TAG_DICT: the dictionary is encoded as described (starting with a 1‑byte field count).
+                        – For TAG_LIST: 1 byte length followed by each element’s TLV encoding.
+                        
+Additional Notes:
+  – Datetime values (such as timestamps) are converted to ISO‑8601 strings and encoded as TAG_STRING.
+  – This protocol avoids any extraneous delimiters or field names in the wire format; keys are encoded only once
+    using a compact length‐prefixed string.
+  – In test measurements this binary TLV approach produces significantly fewer bytes per packet than JSON,
+    which directly maps to improvements in transmission efficiency and scalability as message volume grows.
+
+### Update 1
+Added users list and fixed some bugs regarding message propagation
+
+Fixed encryption and decryption schemes that were bugging in some cases
+
+Added flag and option to use custom wire protocol - need better testing and run experiments.
