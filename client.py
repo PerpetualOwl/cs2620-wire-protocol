@@ -201,7 +201,7 @@ class ChatWindow(QMainWindow):
         self.logged_in = False
 
         self.setWindowTitle("Chat Client")
-        self.resize(600, 400)
+        self.resize(600, 500)
 
         # Main central widget and layout.
         central_widget = QWidget(self)
@@ -213,6 +213,16 @@ class ChatWindow(QMainWindow):
         self.chat_display.setReadOnly(True)
         main_layout.addWidget(QLabel("Chat Messages:"))
         main_layout.addWidget(self.chat_display)
+
+        # New: Available Users section.
+        users_layout = QHBoxLayout()
+        self.users_label = QLabel("Available Users:")
+        users_layout.addWidget(self.users_label)
+        self.users_combobox = QComboBox(self)
+        users_layout.addWidget(self.users_combobox)
+        main_layout.addLayout(users_layout)
+        # When a user is selected from this dropdown, update the recipient field.
+        self.users_combobox.activated[str].connect(self.on_user_selected)
 
         # Layout for sending messages.
         send_layout = QHBoxLayout()
@@ -249,7 +259,7 @@ class ChatWindow(QMainWindow):
         self.delete_message_button.clicked.connect(self.on_delete_message)
         self.delete_account_button.clicked.connect(self.on_delete_account)
 
-        # Timer to periodically update the chat display and your message dropdown.
+        # Timer to periodically update the chat display, available users list, and your message dropdown.
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_chat_display)
         self.update_timer.start(500)  # update every 500 ms
@@ -289,7 +299,7 @@ class ChatWindow(QMainWindow):
 
         recipient = self.recipient_edit.text().strip()
         if not recipient:
-            QMessageBox.warning(self, "Missing recipient", "Please enter a recipient.")
+            QMessageBox.warning(self, "Missing recipient", "Please enter or select a recipient.")
             return
 
         text = self.message_edit.text().strip()
@@ -342,22 +352,24 @@ class ChatWindow(QMainWindow):
             self.close()
 
     def update_chat_display(self):
-        """Refresh the chat display and update the dropdown listing of your own message IDs.
+        """Refresh the chat display, update the available users list, and update the dropdown listing of your own messages.
         
-        Each message is added as an HTML element so that the message_id appears as a tooltip (on hover).
-        The dropdown is populated only with messages sent by you, with each item’s userData set to the corresponding message_id.
+        Each chat message is added as an HTML element (with its message_id as a tooltip).
+        The available users drop–down is built from global chat_data.users.
+        The message deletion dropdown is populated only with messages sent by you.
         """
+        # Update chat messages.
         self.chat_display.clear()
-        # Reset the dropdown.
+        # Reset the message deletion dropdown.
         self.message_dropdown.clear()
-        # We'll collect messages you sent (for deletion) separately.
         user_messages = []
 
         try:
             messages = list(chat_data.messages.values())
+            # Sort messages by timestamp.
             messages.sort(key=lambda m: m.timestamp)
             for msg in messages:
-                # Create HTML that shows message details and uses the message_id as a tooltip.
+                # Format the timestamp.
                 tstamp = msg.timestamp.strftime("%H:%M:%S") if not isinstance(msg.timestamp, str) else msg.timestamp
                 html_line = f'<span title="Message ID: {msg.message_id}">[{tstamp}] {msg.sender} → {msg.recipient}: {msg.message}</span>'
                 self.chat_display.append(html_line)
@@ -366,18 +378,31 @@ class ChatWindow(QMainWindow):
         except Exception as e:
             print(f"Error updating chat display: {e}")
 
-        # Populate the dropdown with a short summary for each of your messages.
+        # Populate the dropdown with a summary for each of your messages.
         for msg in user_messages:
             tstamp = msg.timestamp.strftime("%H:%M:%S") if not isinstance(msg.timestamp, str) else msg.timestamp
             preview = msg.message if len(msg.message) <= 20 else msg.message[:20] + "..."
             display_text = f"[{tstamp}] {preview}"
-            # Use addItem(display, userData) so that when selected you get the message_id.
             self.message_dropdown.addItem(display_text, msg.message_id)
+
+        # New: Update the available users list.
+        self.users_combobox.clear()
+        if self.username:
+            # Exclude your own user name.
+            available_users = sorted(user for user in chat_data.users if user != self.username)
+        else:
+            available_users = sorted(list(chat_data.users))
+        self.users_combobox.addItems(available_users)
+
+    @pyqtSlot(str)
+    def on_user_selected(self, selected_user: str):
+        """When a user is chosen from the available users dropdown, copy that name into the recipient field."""
+        self.recipient_edit.setText(selected_user)
 
     @pyqtSlot(dict)
     def handle_login_response(self, response):
         """
-        This slot is intended to be called (via a thread‐safe signal) when a CREATE_USER_RESPONSE is received.
+        This slot is intended to be called (via a thread–safe signal) when a CREATE_USER_RESPONSE is received.
         The 'response' parameter should be a dict with keys "success" and "message".
         """
         if response.get("success"):
