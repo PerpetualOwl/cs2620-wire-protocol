@@ -165,9 +165,6 @@ def handle_user_input() -> None:
     client_socket.close()
     sys.exit(0)
 
-
-
-
 def receive_data() -> None:
     """Receives data from the server in a loop."""
     while True:
@@ -396,8 +393,6 @@ class ChatWindow(QMainWindow):
             QMessageBox.warning(self, "Login Failed", response.get("message", "Unknown error"))
             # Prompt for login credentials again.
             self.login()
-
-
 
 # To integrate our new GUI‐based input with the rest of the client, we modify process_server_message() so that,
 # whenever a CREATE_USER_RESPONSE is received the chat window is updated. For example, modify process_server_message() as follows:

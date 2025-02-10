@@ -114,10 +114,11 @@ def handle_client(client_socket: socket.socket, address):
                         # send to recipient
                         if r:
                             print("Message added to logs")
-                            for user, client_socket in authed_clients.items():
+                            send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
+                            for user, client_socket_recp in authed_clients.items():
                                 if user == recipent:
                                     print(f"Sending message to {recipent} through packet")
-                                    send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
+                                    send_packet_to_client(client_socket_recp, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
                         else:
                             print("Failed to add message to logs")
 
@@ -127,10 +128,11 @@ def handle_client(client_socket: socket.socket, address):
                         r = chat_data.delete_message(message_id)
                         if r:
                             print("Message deleted from logs")
-                            for user, client_socket in authed_clients.items():
+                            send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
+                            for user, client_socket_recp in authed_clients.items():
                                 if user == username:
                                     print(f"Sending message to {username} through packet")
-                                    send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
+                                    send_packet_to_client(client_socket_recp, ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
                         else:
                             print("Failed to delete message from logs")
                         

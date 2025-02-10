@@ -20,7 +20,7 @@ $(REQUIREMENTS): $(VENV_DIR)
 	$(PIP) install -r $(REQUIREMENTS)
 
 run: $(VENV_DIR) $(REQUIREMENTS)
-	@if ! [[ "$(n)" =~ ^[0-9]+$ ]]; then \
+	@if ! (echo "$(n)" | grep -Eq '^[0-9]+$$'); then \
 		echo "Error: n must be a positive integer"; exit 1; \
 	fi
 	@echo "Starting server and $(n) clients..."
