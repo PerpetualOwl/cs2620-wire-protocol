@@ -89,7 +89,7 @@ class ChatMessage(BaseModel):
     sender: str
     recipient: str
     message: str
-    timestamp: datetime = datetime.now()
+    timestamp: datetime
     message_id: str # unique ID
 
     @model_validator(mode="before")

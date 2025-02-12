@@ -86,3 +86,37 @@ Added users list and fixed some bugs regarding message propagation
 Fixed encryption and decryption schemes that were bugging in some cases
 
 Added flag and option to use custom wire protocol - need better testing and run experiments.
+
+### Update 2
+Continued testing the custom wire protocol with more scenarios to ensure reliability. Encountered a few minor decoding issues caused by incorrectly handling certain data types. Added additional test cases to cover edge cases, and updated encoding and decoding logic to handle such cases more robustly.
+
+Ran some performance experiments to compare the custom protocol against JSON serialization. Measured packet sizes and transmission times for various operations such as user registration, message sending, and message retrieval. Observed significant reductions in packet size and improved speed with the custom protocol, especially for operations involving large payloads like fetching all messages.
+
+### Update 3
+Implemented detailed logging on both client and server to trace the flow of data and capture any unexpected behavior. This helps with debugging and ensures that any errors are easily identifiable. Logs include timestamps and are categorized by operation type for clearer organization.
+
+Improved error handling in the client-side logic. Added more informative error messages and user feedback for issues like connection loss or failed packet transmission. Also, updated the client to automatically attempt reconnection if the server is temporarily unavailable.
+
+### Update 4
+Ran a thorough code review to identify potential security vulnerabilities or inefficiencies. Improved the hashing process for passwords by adding a salt to the hash. This change increases security by making it more difficult to employ brute force attacks on user passwords stored on the server. Noticed that the threading model in the server might benefit from optimization for scalability. Researched several approaches including the use of asynchronous I/O frameworks and message queues. Decided to keep the current threading model for now but it's good to be aware of future improvements.
+
+## 2/11/25
+
+### Update 1
+
+Continued refining the PyQt5 GUI for the client to enhance user experience. Added visual loading indicators for operations that might take a while and ensured that UI components are updated gracefully without blocking the main event loop.
+Faced a deadlock issue in the server when multiple clients attempted simultaneous account creation. Investigated and found that the global lock on user data was held for too long during user account operations. Restructured the code to minimize critical sections and prevent this issue while maintaining data integrity.
+
+### Update 2
+Implemented a priority queue for managing incoming client requests on the server. The queue allows for more efficient scheduling of high-priority tasks, such as user logins, compared to lower priority tasks like bulk message retrieval. This should improve perceived responsiveness for end-users.
+
+Experimented with implementing a rate-limiting feature to prevent abuse of the server resources by a single client. Found this to be relatively straightforward using token bucket algorithms, and decided to make it an optional, configurable feature depending on server deployment needs. 
+### Update 3
+Updated unit tests to achieve greater test coverage, especially for error and edge cases. Created a testing strategy document to guide future contributors on how and what to test, ensuring consistent quality checks across the project.
+
+Prepared project documentation, covering setup instructions, the custom protocol specification, and the encryption methodology employed. Also included some initial user guides for the client-side GUI and command-line interface, to aid first-time users in getting started with the application.
+
+
+## 2/12/25
+
+fix the read/unread handling, add a pointer for last message where the client was connected

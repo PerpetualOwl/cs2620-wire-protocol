@@ -6,6 +6,7 @@ from utils import *
 import time
 import json
 import uuid
+import subprocess
 from threading import Thread
 
 from PyQt5.QtCore import QTimer, pyqtSlot
@@ -89,100 +90,6 @@ def send_packet_to_server(packet: ClientPacket) -> None:
     except Exception as e:
         print_thread(f"Error sending packet: {e}")
         sys.exit(1)
-
-
-def handle_user_input() -> None:
-    """Handles user input, now with commands."""
-    global username, password, logged_in, login_failed
-    time.sleep(1)
-    while (username is None or password is None) and not logged_in:  # Force login/registration
-        username = input("Username: ")
-        password = input("Password: ")
-
-        # hash password immediately, and discard the original
-        password = hash_password(password)
-
-        packet = ClientPacket(type=MessageType.CREATE_USER_REQUEST, data={"username": username, "password": password})
-        send_packet_to_server(packet)
-        print_thread("Login/Registration attempt sent. Waiting for server response...")
-        while not logged_in and not login_failed:
-            pass
-        if login_failed:
-            print_thread("Login/Registration failed. Try again.")
-            username = None
-            password = None
-            logged_in = False
-            login_failed = False
-        else:
-            print_thread("Logged in successfully.")
-            break
-
-    # load all messages
-    packet = ClientPacket(type=MessageType.REQUEST_MESSAGES, data = {"sender": username, "password": password})
-    send_packet_to_server(packet)
-
-    while True:
-        try:
-            user_input: str = input("> ")
-            parts = user_input.split()
-            command = parts[0]
-
-            if command == "send":
-                if len(parts) < 3:
-                    print_thread("Usage: send <recipient> <message>")
-                else:
-                    recipient = parts[1]
-                    message = " ".join(parts[2:])  # Join the rest as the message
-                    packet = ClientPacket(type=MessageType.SEND_MESSAGE, data={"sender": username, "recipient": recipient, "message": message, "password": password})
-                    send_packet_to_server(packet)
-            elif command == "delete":
-                if len(parts) != 2:
-                    print_thread("Usage: delete <message_id>")
-                else:
-                    message_id = parts[1]
-                    packet = ClientPacket(type=MessageType.DELETE_MESSAGE, data={"username": username, "message_id": message_id, "password": password})
-                    send_packet_to_server(packet)
-            elif command == "delete_account":
-                packet = ClientPacket(type=MessageType.DELETE_ACCOUNT, data={"username": username, "password": password})
-                send_packet_to_server(packet)
-                print_thread("Account deleted.")
-                break
-            elif command == "request_messages":
-                packet = ClientPacket(type=MessageType.REQUEST_MESSAGES, data = {"sender": username, "password": password})
-                send_packet_to_server(packet)
-            elif command == "exit":
-                break # Exit the loop and close the connection
-            else:
-                print_thread("Invalid command.")
-
-        except EOFError:
-            print_thread("EOF (Ctrl+D) received. Exiting.")
-            break
-        except Exception as e:
-            print_thread(f"Error processing input: {e}")
-            break
-
-    client_socket.close()
-    sys.exit(0)
-
-def receive_data() -> None:
-    """Receives data from the server in a loop."""
-    while True:
-        try:
-            data: bytes = client_socket.recv(1024)
-            if not data:  # Server disconnected
-                print_thread("Server disconnected.")
-                break
-            process_server_message(data)
-        except OSError as e:
-            print_thread(f"Socket error: {e}")
-            break
-        except Exception as e:
-            print_thread(f"Error receiving data: {e}")
-            break
-    client_socket.close()
-    raise SystemExit(0)
-
 
 def on_startup() -> None:
     """Function that runs on client startup."""
@@ -281,6 +188,13 @@ class ChatWindow(QMainWindow):
             return
         # Immediately hash the password.
         self.password = hash_password(password)
+
+        chunksize, ok = QInputDialog.getText(self, "Login / Register", "Message Retrieval Chunksize: ")
+        if not ok or not chunksize.strip():
+            self.close()
+            return
+        self.chunksize = int(chunksize.strip())
+
 
         # Build and send the login/create packet.
         packet = ClientPacket(
@@ -407,7 +321,7 @@ class ChatWindow(QMainWindow):
         """
         if response.get("success"):
             self.logged_in = True
-            self.statusBar().showMessage("Logged in successfully!")
+            self.statusBar().showMessage(f"Logged in successfully! Retrieving unread messages in chunks of {self.chunksize}.")
             # Once logged in, request all messages.
             packet = ClientPacket(
                 type=MessageType.REQUEST_MESSAGES,
@@ -415,10 +329,8 @@ class ChatWindow(QMainWindow):
             )
             send_packet_to_server(packet)
         else:
-            print("WTF")
-            QMessageBox.warning(self, "Login Failed", response.get("message", "Unknown error"))
-            # Prompt for login credentials again.
-            self.login()
+            QApplication.quit()
+            subprocess.Popen([sys.executable] + sys.argv)
 
 # To integrate our new GUI‐based input with the rest of the client, we modify process_server_message() so that,
 # whenever a CREATE_USER_RESPONSE is received the chat window is updated. For example, modify process_server_message() as follows:
@@ -510,33 +422,3 @@ if __name__ == "__main__":
     # Launch the Qt GUI (which replaces the old handle_user_input() loop).
     on_startup()
     start_gui()
-
-"""
-if __name__ == "__main__":
-    client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    try:
-        client_socket.connect((SERVER_IP, SERVER_PORT))
-        print(f"Connected to server at {SERVER_IP}:{SERVER_PORT}")
-
-        receive_thread: threading.Thread = threading.Thread(target=receive_data)
-        user_thread: threading.Thread = threading.Thread(target=handle_user_input)
-
-        receive_thread.daemon = True
-        user_thread.daemon = True
-
-        receive_thread.start()
-        user_thread.start()
-
-        on_startup()
-
-        while True:
-            pass
-
-    except ConnectionRefusedError:
-        print(f"Connection to {SERVER_IP}:{SERVER_PORT} refused. Make sure the server is running.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        sys.exit(1)
-"""

@@ -112,7 +112,7 @@ def handle_client(client_socket: socket.socket, address):
                         if recipient == username:
                             print(f"Recipient {recipient} was same as sender.")
                             continue
-                        message_obj = ChatMessage(sender=username, recipient=recipient, message=message, message_id=str(uuid.uuid4()))
+                        message_obj = ChatMessage(sender=username, recipient=recipient, message=message, message_id=str(uuid.uuid4()), timestamp=datetime.now())
                         r = chat_data.add_message(message_obj)
                         # send to recipient
                         if r:
