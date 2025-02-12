@@ -103,21 +103,24 @@ def handle_client(client_socket: socket.socket, address):
                         send_packet_to_client(client_socket, ServerPacket(type=MessageType.ALL_MESSAGES, data={"messages": messages.model_dump()}))
 
                     case MessageType.SEND_MESSAGE:
-                        recipent = packet.data["recipient"]
+                        recipient = packet.data["recipient"]
                         message = packet.data["message"]
-                        print(f"Sending message from {username} to {recipent}: {message}")
-                        if recipent not in users:
-                            print(f"Recipient {recipent} not found")
+                        print(f"Sending message from {username} to {recipient}: {message}")
+                        if recipient not in users:
+                            print(f"Recipient {recipient} not found")
                             continue
-                        message_obj = ChatMessage(sender=username, recipient=recipent, message=message, message_id=str(uuid.uuid4()))
+                        if recipient == username:
+                            print(f"Recipient {recipient} was same as sender.")
+                            continue
+                        message_obj = ChatMessage(sender=username, recipient=recipient, message=message, message_id=str(uuid.uuid4()))
                         r = chat_data.add_message(message_obj)
                         # send to recipient
                         if r:
                             print("Message added to logs")
                             send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
                             for user, client_socket_recp in authed_clients.items():
-                                if user == recipent:
-                                    print(f"Sending message to {recipent} through packet")
+                                if user == recipient:
+                                    print(f"Sending message to {recipient} through packet")
                                     send_packet_to_client(client_socket_recp, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
                         else:
                             print("Failed to add message to logs")
@@ -125,12 +128,13 @@ def handle_client(client_socket: socket.socket, address):
                     case MessageType.DELETE_MESSAGE:
                         print(f"Deleting message from {username}")
                         message_id = packet.data["message_id"]
-                        r = chat_data.delete_message(message_id)
+                        message = chat_data.get_message(message_id)
+                        r = chat_data.delete_message(username, message_id, True)
                         if r:
                             print("Message deleted from logs")
                             send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
                             for user, client_socket_recp in authed_clients.items():
-                                if user == username:
+                                if user == username or user == message.recipient:
                                     print(f"Sending message to {username} through packet")
                                     send_packet_to_client(client_socket_recp, ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
                         else:

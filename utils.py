@@ -6,11 +6,15 @@ from typing import Optional, List, Union, Tuple
 from enum import Enum
 from pydantic import BaseModel, model_validator, validator
 from datetime import datetime
+from dotenv import load_dotenv
+import os
 
-SERVER_IP = "127.0.0.1"
-SERVER_PORT = 33259
+load_dotenv()
 
-USE_CUSTOM_WIRE_PROTOCOL = True
+SERVER_IP = os.getenv("SERVER_IP")
+SERVER_PORT = int(os.getenv("SERVER_PORT"))
+
+USE_CUSTOM_WIRE_PROTOCOL = bool(os.getenv("USE_CUSTOM_WIRE_PROTOCOL"))
 
 class MessageType(str, Enum):
     REQUEST_PUBLIC_KEY = "request_public_key"
@@ -120,6 +124,12 @@ class ChatData(BaseModel):
     def get_messages(self, username: str) -> "ChatData":
         messages = {id: msg for id, msg in self.messages.items() if msg.sender == username or msg.recipient == username}
         return ChatData(users=self.users, messages=messages, message_id_by_user=self.message_id_by_user)
+    
+    def get_message(self, message_id: str) -> Optional[ChatMessage]:
+        if message_id in self.messages:
+            return self.messages[message_id]
+        else:
+            return None
 
     def add_user(self, username: str):
         self.users.add(username)
@@ -141,9 +151,9 @@ class ChatData(BaseModel):
         self.message_id_by_user[message.recipient].add(message.message_id)
         return True
 
-    def delete_message(self, sender: str, message_id: str):
-        if (message_id not in self.messages
-            or message_id not in self.message_id_by_user[sender]):
+    def delete_message(self, sender: str, message_id: str, backend: bool = False):
+        if (message_id not in self.messages 
+            or (backend and (message_id not in self.message_id_by_user[sender] or self.messages[message_id].sender != sender))):
             return False
         else:
             msg = self.messages.pop(message_id)

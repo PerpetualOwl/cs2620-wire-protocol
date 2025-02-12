@@ -216,6 +216,10 @@ class TestSecureChat(unittest.TestCase):
         filtered = chat_data.get_messages("Alice")
         self.assertIn("1", filtered.messages)
         self.assertNotIn("2", filtered.messages)
+        
+        # Backend will not let other users delete message.
+        result = chat_data.delete_message("Bob", "1", True)
+        self.assertFalse(result)
 
         # Valid deletion: deleting an existing message with the proper user.
         result = chat_data.delete_message("Alice", "1")

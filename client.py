@@ -415,6 +415,7 @@ class ChatWindow(QMainWindow):
             )
             send_packet_to_server(packet)
         else:
+            print("WTF")
             QMessageBox.warning(self, "Login Failed", response.get("message", "Unknown error"))
             # Prompt for login credentials again.
             self.login()
