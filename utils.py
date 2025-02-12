@@ -8,6 +8,7 @@ from pydantic import BaseModel, model_validator, validator
 from datetime import datetime
 from dotenv import load_dotenv
 import os
+from collections import deque
 
 load_dotenv()
 
@@ -30,6 +31,9 @@ class MessageType(str, Enum):
     USER_DELETED = "user_deleted"
     CREATE_USER_REQUEST = "create_user_request"
     CREATE_USER_RESPONSE = "create_user_response"
+    INITIAL_CHATDATA="initial_chatdata"
+    REQUEST_UNREAD_MESSAGES="request_unread_messages"
+    UNREAD_MESSAGES_RESPONSE="unread_messages_response"
 
 
 class ClientPacket(BaseModel):
@@ -49,6 +53,7 @@ class ClientPacket(BaseModel):
             MessageType.DELETE_MESSAGE: ["username", "message_id", "password"], # or sender and recipient
             MessageType.DELETE_ACCOUNT: ["username", "password"],
             MessageType.CREATE_USER_REQUEST: ["username", "password"],
+            MessageType.REQUEST_UNREAD_MESSAGES: ["username", "num_messages", "password"]
         }
 
         if packet_type in required_fields:
@@ -76,6 +81,8 @@ class ServerPacket(BaseModel):
             MessageType.USER_DELETED: ["username"],
             MessageType.CREATE_USER_RESPONSE: ["success", "message"],
             MessageType.ALL_MESSAGES: ["messages"],
+            MessageType.INITIAL_CHATDATA: ["messages"],
+            MessageType.UNREAD_MESSAGES_RESPONSE: ["messages"],
         }
 
         if packet_type in required_fields:
@@ -120,10 +127,14 @@ class ChatData(BaseModel):
     users: set[str] = set()
     messages: dict[str, ChatMessage] = {}
     message_id_by_user: dict[str, set[str]] = {}
+    unread_queue: dict[str, deque[str]] = {}
 
     def get_messages(self, username: str) -> "ChatData":
         messages = {id: msg for id, msg in self.messages.items() if msg.sender == username or msg.recipient == username}
         return ChatData(users=self.users, messages=messages, message_id_by_user=self.message_id_by_user)
+    
+    def get_initial(self) -> "ChatData":
+        return ChatData(users=self.users, messages={}, message_id_by_user={})
     
     def get_message(self, message_id: str) -> Optional[ChatMessage]:
         if message_id in self.messages:
@@ -173,8 +184,33 @@ class ChatData(BaseModel):
             if send != username:
                 self.message_id_by_user[send].discard(id)
             self.messages.pop(id)
-        self.message_id_by_user.pop(username)
+        self.message_id_by_user.pop(username, None)
+        self.unread_queue.pop(username, None)
         return True
+    
+    # only for backend use
+    def add_unread_message(self, recipient, message_id):
+        if recipient not in self.users:
+            return
+        if message_id not in self.messages:
+            return
+        if recipient not in self.unread_queue:
+            self.unread_queue[recipient] = deque()
+        self.unread_queue[recipient].append(message_id)
+    
+    # only for backend use
+    def pop_unread_messages(self, username, num_messages):
+        if username not in self.unread_queue:
+            return []
+        else:
+            l = len(self.unread_queue[username])
+            messages = []
+            while len(messages) < num_messages and l > 0:
+                id = self.unread_queue[username].popleft()
+                if id in self.messages:
+                    messages.append(self.messages[id])
+                l -= 1
+            return messages
     
     @model_validator(mode="before")
     @classmethod
@@ -308,6 +344,8 @@ PACKET_TYPE_CODES = {
     MessageType.USER_DELETED: 10,
     MessageType.CREATE_USER_REQUEST: 11,
     MessageType.CREATE_USER_RESPONSE: 12,
+    MessageType.INITIAL_CHATDATA: 13,
+    MessageType.REQUEST_UNREAD_MESSAGES: 14,
 }
 PACKET_TYPE_CODES_REV = {v: k for k, v in PACKET_TYPE_CODES.items()}
 

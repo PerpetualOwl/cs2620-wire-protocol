@@ -99,8 +99,16 @@ def handle_client(client_socket: socket.socket, address):
                 match packet.type:
                     case MessageType.REQUEST_MESSAGES:
                         print(f"Sending messages request result to {username}")
-                        messages : ChatData = chat_data.get_messages(username)
-                        send_packet_to_client(client_socket, ServerPacket(type=MessageType.ALL_MESSAGES, data={"messages": messages.model_dump()}))
+                        messages : ChatData = chat_data.get_initial()
+                        send_packet_to_client(client_socket, ServerPacket(type=MessageType.INITIAL_CHATDATA, data={"messages": messages.model_dump()}))
+                        
+                    case MessageType.REQUEST_UNREAD_MESSAGES:
+                        if not packet.data["num_messages"].isdigit():
+                            continue
+                        num_messages = int(packet.data["num_messages"])
+                        print(f"Sending unread messages request result to {username}")
+                        messages : list[str] = chat_data.pop_unread_messages(username, num_messages=num_messages)
+                        send_packet_to_client(client_socket, ServerPacket(type=MessageType.UNREAD_MESSAGES_RESPONSE, data={"messages": messages}))
 
                     case MessageType.SEND_MESSAGE:
                         recipient = packet.data["recipient"]
@@ -118,10 +126,14 @@ def handle_client(client_socket: socket.socket, address):
                         if r:
                             print("Message added to logs")
                             send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
+                            recipient_active = False
                             for user, client_socket_recp in authed_clients.items():
                                 if user == recipient:
+                                    recipient_active = True
                                     print(f"Sending message to {recipient} through packet")
                                     send_packet_to_client(client_socket_recp, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
+                            if not recipient_active:
+                                chat_data.add_unread_message(recipient, message_id=message_obj.message_id)
                         else:
                             print("Failed to add message to logs")
 

@@ -368,7 +368,7 @@ def process_server_message_gui(data: bytes) -> None:
         elif packet.type == MessageType.USER_DELETED:
             username = packet.data["username"]
             chat_data.delete_user(username)
-        elif packet.type == MessageType.ALL_MESSAGES:
+        elif packet.type == MessageType.INITIAL_CHATDATA:
             # Replace chat_data.messages from the packet data.
             messages = packet.data["messages"]
             chat_data = ChatData(**messages)
