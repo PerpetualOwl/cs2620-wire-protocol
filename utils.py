@@ -166,6 +166,12 @@ class ChatData(BaseModel):
             return False
         self.users.remove(username)
         for id in self.message_id_by_user[username]:
+            rec = self.messages[id].recipient
+            send = self.messages[id].sender
+            if rec != username:
+                self.message_id_by_user[rec].discard(id)
+            if send != username:
+                self.message_id_by_user[send].discard(id)
             self.messages.pop(id)
         self.message_id_by_user.pop(username)
         return True
