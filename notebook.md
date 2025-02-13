@@ -124,3 +124,10 @@ fix the read/unread handling, add a pointer for last message where the client wa
 Added README with running detailed instructions, got some good feedback from the demo day with other users and found some bugs.
 
 Verified that running the chat application across devices over network also works, need to make ip empty on server to listen on.
+
+## 2/13/25
+
+# Update 1
+Added much more comprehensive testing and more detailed running instructions
+
+Used some tricks to emulate certain networking/socket features for better end-to-end testing
