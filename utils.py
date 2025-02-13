@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import os
 from collections import deque
 
-load_dotenv()
+load_dotenv(dotenv_path=".env")
 
 SERVER_IP = os.getenv("SERVER_IP")
 SERVER_PORT = int(os.getenv("SERVER_PORT"))
@@ -346,6 +346,7 @@ PACKET_TYPE_CODES = {
     MessageType.CREATE_USER_RESPONSE: 12,
     MessageType.INITIAL_CHATDATA: 13,
     MessageType.REQUEST_UNREAD_MESSAGES: 14,
+    MessageType.UNREAD_MESSAGES_RESPONSE: 15
 }
 PACKET_TYPE_CODES_REV = {v: k for k, v in PACKET_TYPE_CODES.items()}
 
