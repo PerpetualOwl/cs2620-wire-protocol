@@ -1,6 +1,6 @@
 # CS2620 Wire Protocol
 
-## Testing Instructions
+## Running Instructions
 
 1. Ensure a recent version of python is installed. Install venv on the system as well (in most default installations).
 
@@ -14,3 +14,12 @@
 ## Unit/Integration/Regression Testing
 
 All testing code is contained within `test.py` and running make test will show the result of the full testing suite.
+
+## Documentation
+
+General documentation is contained within `docs.md`.
+
+The engineering notebook is contained within `notebook.md`.
+
+
+
