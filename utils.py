@@ -12,8 +12,8 @@ from collections import deque
 
 load_dotenv(dotenv_path=".env")
 
-SERVER_IP = os.getenv("SERVER_IP")
-SERVER_PORT = int(os.getenv("SERVER_PORT"))
+SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "12000"))
 
 USE_CUSTOM_WIRE_PROTOCOL = bool(os.getenv("USE_CUSTOM_WIRE_PROTOCOL"))
 
