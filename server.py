@@ -1,73 +1,75 @@
 import socket
 import threading
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-from typing import Any, Optional, Union, Callable
 import sys, uuid
-
+from datetime import datetime
+from typing import Any, Optional
 from utils import *
 
+# Global server keys.
 SERVER_PUBLIC_KEY: Optional[bytes] = None
 SERVER_PRIVATE_KEY: Optional[bytes] = None
+
+# Global chat data store and user registry.
 chat_data = ChatData()
 users: dict[str, str] = {}
 
-# A list to keep track of connected clients (optional)
-clients = []
-authed_clients: dict[str, socket.socket] = {}
+# Lists and dictionaries to keep track of connections.
+clients = []  # list of all connected sockets
+authed_clients: dict[str, socket.socket] = {}  # username -> client socket
 
 global_lock = threading.Lock()
 
 def send_packet_to_client(client_socket: socket.socket, packet: ServerPacket, is_public_key_response: bool = False) -> None:
-    """Sends a packet to the server."""
-    print(f"Sending packet to {client_socket.getpeername()}: {packet.type}")
+    """Send a packet to a particular client."""
     try:
+        print(f"Sending packet to {client_socket.getpeername()}: {packet.type}")
         data: bytes = serialize_packet(packet)
         client_socket.sendall(data)
     except Exception as e:
         print(f"Error sending packet: {e}")
-        sys.exit(1)
+        print(data)
 
 def broadcast_to_clients(packet: ServerPacket, exclude: Optional[socket.socket] = None) -> None:
-    """Broadcasts a packet to all connected clients."""
+    """Broadcast a packet to all connected clients except one (if specified)."""
     print(f"Broadcasting packet to all clients: {packet.type}")
     for client_socket in clients:
         if client_socket != exclude:
             send_packet_to_client(client_socket, packet)
 
 def handle_client(client_socket: socket.socket, address):
-    """Handles communication with a connected client."""
+    """Handle communication with a connected client."""
     print(f"New connection from {address[0]}:{address[1]}")
     
     try:
         while True:
-            # Wait to receive data from the client
-            message = client_socket.recv(1024)
+            message = client_socket.recv(65536)
             if not message:
-                # No message means the client has closed the connection
                 print(f"Connection closed by {address[0]}:{address[1]}")
                 break
-            with global_lock:
 
-                # check if it is an unencrypted public key request
+            with global_lock:
+                # First check if this is an unencrypted public key request.
                 try:
                     packet: ClientPacket = deserialize_packet(message, ClientPacket)
                     if packet.type == MessageType.REQUEST_PUBLIC_KEY:
-                        send_packet_to_client(client_socket, ServerPacket(type=MessageType.PUBLIC_KEY_RESPONSE, data={"public_key": SERVER_PUBLIC_KEY.decode("utf-8")}))
+                        send_packet_to_client(client_socket, 
+                            ServerPacket(type=MessageType.PUBLIC_KEY_RESPONSE, 
+                                         data={"public_key": SERVER_PUBLIC_KEY.decode("utf-8")}))
                         continue
-                except Exception as _:
+                except Exception:
                     pass
-                
-                # otherwise attempt to decrypt the message
+
+                # Otherwise, attempt decryption.
                 try:
                     packet = deserialize_packet(decrypt(SERVER_PRIVATE_KEY, message), ClientPacket)
                 except Exception as e:
-                    print(f"Error decrypting message: {e}")
+                    print(f"Error decrypting message from {address[0]}:{address[1]}: {e}")
                     continue
 
-                print(f"Received message from {address[0]}:{address[1]}: {packet.type}")
+                print(f"Received packet from {address[0]}:{address[1]}: {packet.type}")
                 print("\tData:", packet.data)
+
+                # Handle new user creation or login.
                 if packet.type == MessageType.CREATE_USER_REQUEST:
                     username = packet.data["username"]
                     password = packet.data["password"]
@@ -77,18 +79,27 @@ def handle_client(client_socket: socket.socket, address):
                         users[username] = password
                         chat_data.add_user(username)
                         authed_clients[username] = client_socket
-                        broadcast_to_clients(ServerPacket(type=MessageType.USER_ADDED, data={"username": username}), exclude=client_socket)
-                        send_packet_to_client(client_socket, ServerPacket(type=MessageType.CREATE_USER_RESPONSE, data={"success": True, "message": "New account created!"}))
+                        broadcast_to_clients(ServerPacket(type=MessageType.USER_ADDED, data={"username": username}), 
+                                               exclude=client_socket)
+                        send_packet_to_client(client_socket, 
+                            ServerPacket(type=MessageType.CREATE_USER_RESPONSE, 
+                                         data={"success": True, "message": "New account created!"}))
                     else:
                         if password != users[username]:
-                            print(f"Failed to create user {username}: Wrong password")
-                            send_packet_to_client(client_socket, ServerPacket(type=MessageType.CREATE_USER_RESPONSE, data={"success": False, "message": "Wrong password!"}))
+                            print(f"Failed login for user {username}: Wrong password")
+                            send_packet_to_client(client_socket, 
+                                ServerPacket(type=MessageType.CREATE_USER_RESPONSE, 
+                                             data={"success": False, "message": "Wrong password!"}))
                         else:
                             print(f"User {username} logged in")
                             authed_clients[username] = client_socket
-                            send_packet_to_client(client_socket, ServerPacket(type=MessageType.CREATE_USER_RESPONSE, data={"success": True, "message": "Logged in!"}))
+                            unread_count = len(chat_data.unread_queue.get(username, []))
+                            send_packet_to_client(client_socket, 
+                                ServerPacket(type=MessageType.CREATE_USER_RESPONSE, 
+                                             data={"success": True, "message": f"Logged in! You have {unread_count} unread messages."}))
                     continue
-                # check auth
+
+                # For all other packet types, extract username and password for auth.
                 username = packet.data.get("sender", packet.data.get("username"))
                 password = packet.data["password"]
 
@@ -96,61 +107,96 @@ def handle_client(client_socket: socket.socket, address):
                     print(f"Unauthorized access from {address[0]}:{address[1]}")
                     continue
 
+                # Process the remaining packet types using a match-case.
                 match packet.type:
                     case MessageType.REQUEST_MESSAGES:
-                        print(f"Sending messages request result to {username}")
-                        messages : ChatData = chat_data.get_messages(username)
-                        send_packet_to_client(client_socket, ServerPacket(type=MessageType.ALL_MESSAGES, data={"messages": messages.model_dump()}))
-
+                        print(f"Sending initial messages to {username}")
+                        messages: ChatData = chat_data.get_initial()
+                        send_packet_to_client(client_socket, 
+                            ServerPacket(type=MessageType.INITIAL_CHATDATA, 
+                                         data={"messages": messages.model_dump()}))
+                    
+                    case MessageType.REQUEST_UNREAD_MESSAGES:
+                        # New branch for unread messages.
+                        # Verify that 'num_messages' is a valid number string.
+                        if not str(packet.data.get("num_messages", "")).isdigit():
+                            continue
+                        num_messages = int(packet.data["num_messages"])
+                        print(f"Sending {num_messages} unread message(s) to {username}")
+                        unread_msgs = chat_data.pop_unread_messages(username, num_messages=num_messages)
+                        # Convert each ChatMessage to its dict representation.
+                        unread_msgs_dict = [msg.model_dump() for msg in unread_msgs]
+                        send_packet_to_client(client_socket, 
+                            ServerPacket(type=MessageType.UNREAD_MESSAGES_RESPONSE, 
+                                         data={"messages": unread_msgs_dict}))
+                    
                     case MessageType.SEND_MESSAGE:
                         recipient = packet.data["recipient"]
-                        message = packet.data["message"]
-                        print(f"Sending message from {username} to {recipient}: {message}")
+                        msg_text = packet.data["message"]
+                        print(f"Message from {username} to {recipient}: {msg_text}")
                         if recipient not in users:
                             print(f"Recipient {recipient} not found")
                             continue
                         if recipient == username:
-                            print(f"Recipient {recipient} was same as sender.")
+                            print(f"Sender and recipient are the same ({username}), ignoring.")
                             continue
-                        message_obj = ChatMessage(sender=username, recipient=recipient, message=message, message_id=str(uuid.uuid4()), timestamp=datetime.now())
-                        r = chat_data.add_message(message_obj)
-                        # send to recipient
-                        if r:
-                            print("Message added to logs")
-                            send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
-                            for user, client_socket_recp in authed_clients.items():
+                        message_obj = ChatMessage(
+                            sender=username, 
+                            recipient=recipient, 
+                            message=msg_text, 
+                            message_id=str(uuid.uuid4()), 
+                            timestamp=datetime.now()
+                        )
+                        if chat_data.add_message(message_obj):
+                            print("Message logged successfully")
+                            # Send a confirmation to the sender.
+                            send_packet_to_client(client_socket, 
+                                ServerPacket(type=MessageType.MESSAGE_RECEIVED, 
+                                             data=message_obj.model_dump()))
+                            recipient_active = False
+                            # If recipient is online, send the message immediately.
+                            for user, rec_socket in authed_clients.items():
                                 if user == recipient:
-                                    print(f"Sending message to {recipient} through packet")
-                                    send_packet_to_client(client_socket_recp, ServerPacket(type=MessageType.MESSAGE_RECEIVED, data=message_obj.model_dump()))
+                                    recipient_active = True
+                                    print(f"Delivering message to active user {recipient}")
+                                    send_packet_to_client(rec_socket, 
+                                        ServerPacket(type=MessageType.MESSAGE_RECEIVED, 
+                                                     data=message_obj.model_dump()))
+                            if not recipient_active:
+                                # Otherwise, add the message ID to the recipient's unread queue.
+                                chat_data.add_unread_message(recipient, message_obj.message_id)
                         else:
                             print("Failed to add message to logs")
-
+                    
                     case MessageType.DELETE_MESSAGE:
-                        print(f"Deleting message from {username}")
+                        print(f"Deleting message for {username}")
                         message_id = packet.data["message_id"]
-                        message = chat_data.get_message(message_id)
-                        r = chat_data.delete_message(username, message_id, True)
-                        if r:
-                            print("Message deleted from logs")
-                            send_packet_to_client(client_socket, ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
-                            for user, client_socket_recp in authed_clients.items():
-                                if user == username or user == message.recipient:
-                                    print(f"Sending message to {username} through packet")
-                                    send_packet_to_client(client_socket_recp, ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
+                        msg_obj = chat_data.get_message(message_id)
+                        if chat_data.delete_message(username, message_id, backend=True):
+                            print("Message deleted successfully")
+                            send_packet_to_client(client_socket, 
+                                ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
+                            for user, client_sock in authed_clients.items():
+                                if user == username or (msg_obj and user == msg_obj.recipient):
+                                    send_packet_to_client(client_sock, 
+                                        ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
                         else:
-                            print("Failed to delete message from logs")
-                        
+                            print("Failed to delete the message")
+                    
                     case MessageType.DELETE_ACCOUNT:
                         print(f"Deleting account {username}")
                         if username in users:
                             del users[username]
                             chat_data.delete_user(username)
-                            print(f"User {username} deleted")
-                            broadcast_to_clients(ServerPacket(type=MessageType.USER_DELETED, data={"username": username}), exclude=client_socket)
-                            send_packet_to_client(client_socket, ServerPacket(type=MessageType.USER_DELETED, data={"username": username}))
+                            print(f"Account {username} deleted")
+                            broadcast_to_clients(ServerPacket(type=MessageType.USER_DELETED, data={"username": username}),
+                                                   exclude=client_socket)
+                            send_packet_to_client(client_socket, 
+                                ServerPacket(type=MessageType.USER_DELETED, data={"username": username}))
                             break
                         else:
                             print(f"User {username} not found")
+                    
                     case _:
                         pass
             
@@ -159,10 +205,10 @@ def handle_client(client_socket: socket.socket, address):
     except Exception as e:
         print(f"An error occurred with {address[0]}:{address[1]}: {e}")
     finally:
-        # Clean up the connection
         client_socket.close()
-        for user, client in authed_clients.items():
-            if client == client_socket:
+        # Remove the client from authed_clients if present.
+        for user, sock in list(authed_clients.items()):
+            if sock == client_socket:
                 del authed_clients[user]
                 break
         if client_socket in clients:
@@ -170,23 +216,18 @@ def handle_client(client_socket: socket.socket, address):
         print(f"Closed connection with {address[0]}:{address[1]}")
 
 def main():
-    # Create a TCP/IP socket
-    # Server configuration
     global SERVER_PUBLIC_KEY, SERVER_PRIVATE_KEY
     SERVER_PRIVATE_KEY, SERVER_PUBLIC_KEY = generate_key_pair()
     server_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
-        # Bind the socket to the server address and port
         server_socket.bind((SERVER_IP, SERVER_PORT))
-        server_socket.listen(5)  # Listen for up to 5 connections
+        server_socket.listen(5)
         print(f"Server listening on {SERVER_IP}:{SERVER_PORT}")
 
         while True:
-            # Wait for a new client connection
             client_socket, address = server_socket.accept()
             clients.append(client_socket)
-            # Create and start a new thread to handle the client
             client_thread = threading.Thread(target=handle_client, args=(client_socket, address))
             client_thread.daemon = True
             client_thread.start()
@@ -195,7 +236,6 @@ def main():
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
-        # Close all client connections
         for c in clients:
             c.close()
         server_socket.close()

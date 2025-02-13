@@ -1,46 +1,37 @@
 VENV_DIR = venv
 PYTHON = $(VENV_DIR)/bin/python3
 PIP = $(VENV_DIR)/bin/pip3
-REQUIREMENTS = requirements.txt
+REQUIREMENTS_FILE = requirements.txt
 
-server: $(VENV_DIR) $(REQUIREMENTS)
+.PHONY: all venv install-deps server client test help clean
+
+all: help
+
+# Create the virtual environment if it doesn’t already exist.
+venv:
+	@test -d $(VENV_DIR) || python3.12 -m venv $(VENV_DIR)
+
+# Always install (or upgrade) pip and install the required packages.
+install-deps: venv
+	$(PIP) install --upgrade pip
+	$(PIP) install -r $(REQUIREMENTS_FILE)
+
+server: install-deps
 	$(PYTHON) server.py
 
-client: $(VENV_DIR) $(REQUIREMENTS)
+client: install-deps
 	$(PYTHON) client.py
 
-test: $(VENV_DIR) $(REQUIREMENTS)
+test: install-deps
 	$(PYTHON) -m unittest test.py
-
-$(VENV_DIR):
-	python3.12 -m venv $(VENV_DIR)
-
-$(REQUIREMENTS): $(VENV_DIR)
-	python3.12 -m pip install --upgrade pip
-	$(PIP) install -r $(REQUIREMENTS)
-
-run: $(VENV_DIR) $(REQUIREMENTS)
-	@if ! (echo "$(n)" | grep -Eq '^[0-9]+$$'); then \
-		echo "Error: n must be a positive integer"; exit 1; \
-	fi
-	@echo "Starting server and $(n) clients..."
-	@trap 'kill 0' SIGINT SIGTERM EXIT
-	@$(PYTHON) server.py &
-	@sleep 2  # Allow server to start
-	@for i in $(shell seq 1 $(n)); do \
-		echo "Starting client $$i"; \
-		$(PYTHON) client.py & \
-	done
-	@wait
 
 help:
 	@echo "Usage:"
 	@echo "  make server      - Run the server"
 	@echo "  make client      - Run a client"
 	@echo "  make test        - Run unit tests"
-	@echo "  make run n=<N>   - Run the server and N clients in parallel (N must be a positive integer)"
+	@echo "  make clean       - Remove the virtual environment"
 	@echo "  make help        - Display this help message"
 
-.PHONY: server client test run help
-
-all: help
+clean:
+	rm -rf $(VENV_DIR)

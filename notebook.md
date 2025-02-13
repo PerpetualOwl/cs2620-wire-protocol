@@ -120,3 +120,7 @@ Prepared project documentation, covering setup instructions, the custom protocol
 ## 2/12/25
 
 fix the read/unread handling, add a pointer for last message where the client was connected
+
+Added README with running detailed instructions, got some good feedback from the demo day with other users and found some bugs.
+
+Verified that running the chat application across devices over network also works, need to make ip empty on server to listen on.

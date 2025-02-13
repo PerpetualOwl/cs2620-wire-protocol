@@ -26,54 +26,61 @@ chat_window = None
 
 def print_thread(text: str) -> None:
     print("\033[F", end="", flush=True)  # Move cursor up one line
-    print("\033[K", end="", flush=True) # Clear the current line
+    print("\033[K", end="", flush=True)  # Clear the current line
     print(text, flush=True)
-    print("\033[E", end="", flush=True) # Move cursor to the beginning of the next line
+    print("\033[E", end="", flush=True)  # Move cursor to the beginning of the next line
 
-
-def process_server_message(data: bytes) -> None:
-    """Processes data received from the server."""
-    global SERVER_PUBLIC_KEY, chat_data, logged_in, login_failed
+def process_server_message_gui(data: bytes) -> None:
+    """
+    Process server messages for the GUI.
+    Now also handles the UNREAD_MESSAGES_RESPONSE which contains unread messages.
+    """
+    global chat_window, chat_data, SERVER_PUBLIC_KEY
     try:
         packet: ServerPacket = deserialize_packet(data, ServerPacket)
-        match packet.type:
-            case MessageType.PUBLIC_KEY_RESPONSE:
-                SERVER_PUBLIC_KEY = packet.data["public_key"].encode("utf-8")
-                print_thread("Received server public key.")
-            case MessageType.MESSAGE_RECEIVED:
-                message_data = packet.data
-                message = ChatMessage(**message_data)  # Create ChatMessage object
-                chat_data.add_message(message)
-                print_thread(f"New message received from {message.sender}: {message.message}")
-            case MessageType.MESSAGE_DELETED:
-                message_id = packet.data["message_id"]
-                chat_data.delete_message(message_id)
-                print_thread(f"Message deleted: {message_id}")
-            case MessageType.USER_ADDED:
-                username = packet.data["username"]
-                chat_data.add_user(username)
-                print_thread(f"User added: {username}")
-            case MessageType.USER_DELETED:
-                username = packet.data["username"]
-                chat_data.delete_user(username)
-                print_thread(f"User deleted: {username}")
-            case MessageType.CREATE_USER_RESPONSE:
-                logged_in = packet.data["success"]
-                message = packet.data["message"]
-                if logged_in:
-                    print_thread(f"User created/login successful: {message}")
-                else:
-                    login_failed = True
-                    print_thread(f"Failed to create user: {message}")
-            case MessageType.ALL_MESSAGES:
-                messages = packet.data["messages"]
-                chat_data = ChatData(**messages)
-                print_thread("All messages loaded.")
-                print_thread(chat_data)
-            case _:
-                print_thread(f"Received unknown message type: {packet.type}")
+        if packet.type == MessageType.PUBLIC_KEY_RESPONSE:
+            SERVER_PUBLIC_KEY = packet.data["public_key"].encode("utf-8")
+            print("Received server public key.")
+        elif packet.type == MessageType.CREATE_USER_RESPONSE:
+            # Forward the login response to the chat window:
+            if chat_window:
+                chat_window.handle_login_response(packet.data)
+        elif packet.type == MessageType.MESSAGE_RECEIVED:
+            message_data = packet.data
+            try:
+                new_msg = ChatMessage(**message_data)
+                chat_data.add_message(new_msg)
+            except Exception as e:
+                print("Error adding message:", e)
+        elif packet.type == MessageType.UNREAD_MESSAGES_RESPONSE:
+            # New branch: Process a list of unread messages sent by the server.
+            messages_list = packet.data.get("messages", [])
+            if not isinstance(messages_list, list):
+                print("Unexpected unread messages format.")
+            else:
+                for msg_data in messages_list:
+                    try:
+                        new_msg = ChatMessage(**msg_data)
+                        chat_data.add_message(new_msg)
+                    except Exception as e:
+                        print("Error adding unread message:", e)
+                print(f"Added {len(messages_list)} unread message(s).")
+        elif packet.type == MessageType.MESSAGE_DELETED:
+            message_id = packet.data["message_id"]
+            # Delete message (adjusting the call since our ChatData.delete_message requires sender info only for backend)
+            chat_data.delete_message("", message_id)
+        elif packet.type == MessageType.USER_ADDED:
+            uname = packet.data["username"]
+            chat_data.add_user(uname)
+        elif packet.type == MessageType.USER_DELETED:
+            uname = packet.data["username"]
+            chat_data.delete_user(uname)
+        elif packet.type == MessageType.INITIAL_CHATDATA:
+            messages = packet.data["messages"]
+            chat_data = ChatData(**messages)
+        # (Other packet types can be handled as needed.)
     except Exception as e:
-        print_thread(f"Error processing server message: {e}")
+        print("Error processing server message (GUI):", e)
 
 def send_packet_to_server(packet: ClientPacket) -> None:
     """Sends a packet to the server."""
@@ -99,7 +106,7 @@ def on_startup() -> None:
         print(f"Error on startup: {e}")
         sys.exit(1)
 
-# Define a QMainWindow subclass that will serve as our chat client GUI.
+# Define our main chat window.
 class ChatWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -115,20 +122,19 @@ class ChatWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Chat display (we use HTML so that each text line has a tooltip with its message_id).
+        # Chat display section.
         self.chat_display = QTextBrowser(self)
         self.chat_display.setReadOnly(True)
         main_layout.addWidget(QLabel("Chat Messages:"))
         main_layout.addWidget(self.chat_display)
 
-        # New: Available Users section.
+        # Available Users section.
         users_layout = QHBoxLayout()
         self.users_label = QLabel("Available Users:")
         users_layout.addWidget(self.users_label)
         self.users_combobox = QComboBox(self)
         users_layout.addWidget(self.users_combobox)
         main_layout.addLayout(users_layout)
-        # When a user is selected from this dropdown, update the recipient field.
         self.users_combobox.activated[str].connect(self.on_user_selected)
 
         # Layout for sending messages.
@@ -136,16 +142,16 @@ class ChatWindow(QMainWindow):
         self.recipient_edit = QLineEdit(self)
         self.recipient_edit.setPlaceholderText("Recipient username")
         send_layout.addWidget(self.recipient_edit)
-
         self.message_edit = QLineEdit(self)
         self.message_edit.setPlaceholderText("Type your message here...")
         send_layout.addWidget(self.message_edit)
-
         self.send_button = QPushButton("Send", self)
         send_layout.addWidget(self.send_button)
         main_layout.addLayout(send_layout)
-        
-        # Layout for message deletion controls with a dropdown.
+        self.send_button.clicked.connect(self.on_send_message)
+        self.message_edit.returnPressed.connect(self.on_send_message)
+
+        # Layout for message deletion controls.
         deletion_layout = QHBoxLayout()
         deletion_layout.addWidget(QLabel("Your Messages:"))
         self.message_dropdown = QComboBox(self)
@@ -153,29 +159,37 @@ class ChatWindow(QMainWindow):
         self.delete_message_button = QPushButton("Delete Selected Message", self)
         deletion_layout.addWidget(self.delete_message_button)
         main_layout.addLayout(deletion_layout)
-        
+        self.delete_message_button.clicked.connect(self.on_delete_message)
+
         # Layout for account deletion.
         account_deletion_layout = QHBoxLayout()
         self.delete_account_button = QPushButton("Delete Account", self)
         account_deletion_layout.addWidget(self.delete_account_button)
         main_layout.addLayout(account_deletion_layout)
-
-        # Connect signals.
-        self.send_button.clicked.connect(self.on_send_message)
-        self.message_edit.returnPressed.connect(self.on_send_message)
-        self.delete_message_button.clicked.connect(self.on_delete_message)
         self.delete_account_button.clicked.connect(self.on_delete_account)
 
-        # Timer to periodically update the chat display, available users list, and your message dropdown.
+        # ***** New: Layout for requesting unread messages *****
+        unread_layout = QHBoxLayout()
+        unread_layout.addWidget(QLabel("Unread Count:"))
+        self.unread_count_edit = QLineEdit(self)
+        self.unread_count_edit.setPlaceholderText("Enter number")
+        unread_layout.addWidget(self.unread_count_edit)
+        self.request_unread_button = QPushButton("Request Unread Messages", self)
+        unread_layout.addWidget(self.request_unread_button)
+        main_layout.addLayout(unread_layout)
+        self.request_unread_button.clicked.connect(self.on_request_unread_messages)
+        # *********************************************************
+
+        # Timer to periodically update the chat display, available users, and message dropdown.
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_chat_display)
-        self.update_timer.start(500)  # update every 500 ms
+        self.update_timer.start(500)  # update every 500ms
 
         # Prompt for login/registration shortly after startup.
         QTimer.singleShot(100, self.login)
 
     def login(self):
-        """Prompt the user for username and password, then send login/create packet."""
+        """Prompt for username and password then send login/create packet."""
         username, ok = QInputDialog.getText(self, "Login / Register", "Username:")
         if not ok or not username.strip():
             self.close()
@@ -188,14 +202,6 @@ class ChatWindow(QMainWindow):
             return
         # Immediately hash the password.
         self.password = hash_password(password)
-
-        chunksize, ok = QInputDialog.getText(self, "Login / Register", "Message Retrieval Chunksize: ")
-        if not ok or not chunksize.strip():
-            self.close()
-            return
-        self.chunksize = int(chunksize.strip())
-
-
         # Build and send the login/create packet.
         packet = ClientPacket(
             type=MessageType.CREATE_USER_REQUEST,
@@ -233,13 +239,11 @@ class ChatWindow(QMainWindow):
         if not self.logged_in:
             QMessageBox.warning(self, "Not logged in", "Please log in first.")
             return
-        # Get the message_id stored as the item data from the currently selected dropdown entry.
         message_id = self.message_dropdown.currentData()
         if message_id is None:
             QMessageBox.information(self, "No Selection", "No message selected for deletion.")
             return
 
-        # Send a DELETE_MESSAGE packet.
         packet = ClientPacket(
             type=MessageType.DELETE_MESSAGE,
             data={"username": self.username, "message_id": message_id, "password": self.password}
@@ -248,7 +252,7 @@ class ChatWindow(QMainWindow):
 
     @pyqtSlot()
     def on_delete_account(self):
-        """Ask for confirmation then send a DELETE_ACCOUNT packet to the server."""
+        """Ask for confirmation then send a DELETE_ACCOUNT packet."""
         reply = QMessageBox.question(
             self,
             "Delete Account",
@@ -262,28 +266,41 @@ class ChatWindow(QMainWindow):
                 data={"username": self.username, "password": self.password}
             )
             send_packet_to_server(packet)
-            QMessageBox.information(self, "Account Deleted", "Your account has been deleted. The application will now close.")
+            QMessageBox.information(self, "Account Deleted",
+                                    "Your account has been deleted. The application will now close.")
             self.close()
 
+    @pyqtSlot()
+    def on_request_unread_messages(self):
+        """Send a packet to request unread messages from the server."""
+        if not self.logged_in:
+            QMessageBox.warning(self, "Not logged in", "Please log in first.")
+            return
+        count_text = self.unread_count_edit.text().strip()
+        if not count_text.isdigit():
+            QMessageBox.warning(self, "Invalid Input", "Please enter a valid number for unread message count.")
+            return
+        packet = ClientPacket(
+            type=MessageType.REQUEST_UNREAD_MESSAGES,
+            data={"username": self.username, "num_messages": count_text, "password": self.password}
+        )
+        send_packet_to_server(packet)
+        self.unread_count_edit.clear()
+        self.statusBar().showMessage(f"Requested {count_text} unread messages...", 3000)
+
     def update_chat_display(self):
-        """Refresh the chat display, update the available users list, and update the dropdown listing of your own messages.
-        
-        Each chat message is added as an HTML element (with its message_id as a tooltip).
-        The available users drop–down is built from global chat_data.users.
-        The message deletion dropdown is populated only with messages sent by you.
         """
-        # Update chat messages.
+        Refresh the chat display, update the available users list,
+        and update the dropdown listing of your own messages.
+        """
         self.chat_display.clear()
-        # Reset the message deletion dropdown.
         self.message_dropdown.clear()
         user_messages = []
 
         try:
-            messages = list(chat_data.messages.values())
-            # Sort messages by timestamp.
-            messages.sort(key=lambda m: m.timestamp)
-            for msg in messages:
-                # Format the timestamp.
+            messages_list = list(chat_data.messages.values())
+            messages_list.sort(key=lambda m: m.timestamp)
+            for msg in messages_list:
                 tstamp = msg.timestamp.strftime("%H:%M:%S") if not isinstance(msg.timestamp, str) else msg.timestamp
                 html_line = f'<span title="Message ID: {msg.message_id}">[{tstamp}] {msg.sender} → {msg.recipient}: {msg.message}</span>'
                 self.chat_display.append(html_line)
@@ -292,17 +309,14 @@ class ChatWindow(QMainWindow):
         except Exception as e:
             print(f"Error updating chat display: {e}")
 
-        # Populate the dropdown with a summary for each of your messages.
         for msg in user_messages:
             tstamp = msg.timestamp.strftime("%H:%M:%S") if not isinstance(msg.timestamp, str) else msg.timestamp
             preview = msg.message if len(msg.message) <= 20 else msg.message[:20] + "..."
             display_text = f"[{tstamp}] {preview}"
             self.message_dropdown.addItem(display_text, msg.message_id)
 
-        # New: Update the available users list.
         self.users_combobox.clear()
         if self.username:
-            # Exclude your own user name.
             available_users = sorted(user for user in chat_data.users if user != self.username)
         else:
             available_users = sorted(list(chat_data.users))
@@ -310,80 +324,37 @@ class ChatWindow(QMainWindow):
 
     @pyqtSlot(str)
     def on_user_selected(self, selected_user: str):
-        """When a user is chosen from the available users dropdown, copy that name into the recipient field."""
+        """When a user is selected, copy that name into the recipient field."""
         self.recipient_edit.setText(selected_user)
 
     @pyqtSlot(dict)
     def handle_login_response(self, response):
         """
-        This slot is intended to be called (via a thread–safe signal) when a CREATE_USER_RESPONSE is received.
-        The 'response' parameter should be a dict with keys "success" and "message".
+        This slot is intended to be called when a CREATE_USER_RESPONSE is received.
+        The 'response' dictionary should include "success" and "message".
         """
         if response.get("success"):
-            self.logged_in = True
-            self.statusBar().showMessage(f"Logged in successfully! Retrieving unread messages in chunks of {self.chunksize}.")
-            # Once logged in, request all messages.
+            if response.get("success"):
+                self.logged_in = True
+                # Use the server’s message that now contains the unread count.
+                self.statusBar().showMessage(response.get("message", f"Logged in successfully! Welcome, {self.username}!"))
+            # Once logged in, optionally request initial messages.
             packet = ClientPacket(
                 type=MessageType.REQUEST_MESSAGES,
                 data={"sender": self.username, "password": self.password}
             )
             send_packet_to_server(packet)
         else:
+            QMessageBox.critical(self, "Login Failed", response.get("message", "Unknown error"))
             QApplication.quit()
             subprocess.Popen([sys.executable] + sys.argv)
 
-# To integrate our new GUI‐based input with the rest of the client, we modify process_server_message() so that,
-# whenever a CREATE_USER_RESPONSE is received the chat window is updated. For example, modify process_server_message() as follows:
-def process_server_message_gui(data: bytes) -> None:
-    """
-    This function is similar to your original process_server_message() but (a) it avoids printing
-    to the console and (b) it forwards login responses and message updates to the GUI.
-    """
-    global chat_window, chat_data, SERVER_PUBLIC_KEY
-
-    try:
-        packet: ServerPacket = deserialize_packet(data, ServerPacket)
-        if packet.type == MessageType.PUBLIC_KEY_RESPONSE:
-            SERVER_PUBLIC_KEY = packet.data["public_key"].encode("utf-8")
-            print("Received server public key.")
-        elif packet.type == MessageType.CREATE_USER_RESPONSE:
-            # Forward the login response to the chat window:
-            if chat_window:
-                # Since this slot runs on the main thread we can invoke the slot safely.
-                chat_window.handle_login_response(packet.data)
-        elif packet.type == MessageType.MESSAGE_RECEIVED:
-            message_data = packet.data
-            # Create a ChatMessage object and add it to chat_data.
-            try:
-                new_msg = ChatMessage(**message_data)
-                chat_data.add_message(new_msg)
-            except Exception as e:
-                print("Error adding message:", e)
-        elif packet.type == MessageType.MESSAGE_DELETED:
-            message_id = packet.data["message_id"]
-            chat_data.delete_message("", message_id)  # adjust as needed
-        elif packet.type == MessageType.USER_ADDED:
-            username = packet.data["username"]
-            chat_data.add_user(username)
-        elif packet.type == MessageType.USER_DELETED:
-            username = packet.data["username"]
-            chat_data.delete_user(username)
-        elif packet.type == MessageType.ALL_MESSAGES:
-            # Replace chat_data.messages from the packet data.
-            messages = packet.data["messages"]
-            chat_data = ChatData(**messages)
-        # (Other packet types can be handled as you see fit.)
-    except Exception as e:
-        print("Error processing server message (GUI):", e)
-
-
-# In the receive_data() thread function, replace the call to process_server_message() with process_server_message_gui()
 def receive_data():
-    """Receives data from the server in a loop."""
+    """Receive data from the server in a loop."""
     global client_socket
     while True:
         try:
-            data: bytes = client_socket.recv(1024)
+            data: bytes = client_socket.recv(65536)
             if not data:
                 print("Server disconnected.")
                 break
@@ -394,19 +365,16 @@ def receive_data():
     client_socket.close()
     sys.exit(0)
 
-
 def start_gui():
-    """This function creates the QApplication and ChatWindow and starts the GUI event loop."""
+    """Creates the QApplication and ChatWindow; then starts the event loop."""
     global chat_window
     app = QApplication(sys.argv)
     chat_window = ChatWindow()
     chat_window.show()
     sys.exit(app.exec_())
 
-
 if __name__ == "__main__":
-    import socket
-    # Create your client socket as before:
+    # Create the client socket and connect.
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         client_socket.connect((SERVER_IP, SERVER_PORT))
@@ -415,10 +383,10 @@ if __name__ == "__main__":
         print("Connection error:", e)
         sys.exit(1)
 
-    # Start a thread to listen from the server:
+    # Start a thread to listen for server messages.
     receive_thread = Thread(target=receive_data, daemon=True)
     receive_thread.start()
 
-    # Launch the Qt GUI (which replaces the old handle_user_input() loop).
+    # Request the server public key and then start the GUI.
     on_startup()
     start_gui()
