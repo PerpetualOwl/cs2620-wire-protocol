@@ -485,10 +485,13 @@ def serialize_packet(packet: Union[ClientPacket, ServerPacket]) -> bytes:
         # Encode the data dictionary (if None, use empty dict).
         data_dict = packet.data if packet.data is not None else {}
         encoded_data = _encode_dict(data_dict)
-        return struct.pack("!B", packet_code) + encoded_data
+        packet = struct.pack("!B", packet_code) + encoded_data
+        print("Packet length is:", len(packet))
+        return packet
     else:
         packet_dict = packet.model_dump()  # Use pydantic v2 export
         packet_json = json.dumps(packet_dict).encode("utf-8")
+        print("Packet length is:", len(packet_json))
         return packet_json
 
 def deserialize_packet(packet_bytes: bytes, packet_cls: type[Union[ClientPacket, ServerPacket]]) -> Union[ClientPacket, ServerPacket]:
