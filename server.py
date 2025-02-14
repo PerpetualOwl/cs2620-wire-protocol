@@ -182,6 +182,20 @@ def handle_client(client_socket: socket.socket, address):
                                         ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
                         else:
                             print("Failed to delete the message")
+                    case MessageType.DELETE_MESSAGES:
+                        message_ids = packet.data["message_ids"]
+                        for mid in message_ids:
+                            msg_obj = chat_data.get_message(mid)
+                            # Look up the message if needed (optionally logging any that do not exist)
+                            if chat_data.delete_message(username, mid, backend=True):
+                                print(f"Deleted message {mid} for {username}")
+                                # Optionally broadcast the deletion update to both sender and recipient:
+                                for user, client_sock in authed_clients.items():
+                                    if user == username or (msg_obj and user == msg_obj.recipient):
+                                        send_packet_to_client(client_sock, 
+                                            ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": mid}))
+                            else:
+                                print(f"Failed to delete message {mid}")
                     
                     case MessageType.DELETE_ACCOUNT:
                         print(f"Deleting account {username}")

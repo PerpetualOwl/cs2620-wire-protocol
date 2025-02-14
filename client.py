@@ -9,10 +9,11 @@ import uuid
 import subprocess
 from threading import Thread
 
-from PyQt5.QtCore import QTimer, pyqtSlot
+from PyQt5.QtCore import Qt, QTimer, pyqtSlot
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTextBrowser, QLineEdit, QPushButton,
-                             QInputDialog, QMessageBox, QLabel, QComboBox)
+                             QInputDialog, QMessageBox, QLabel, QComboBox, 
+                             QListWidget, QAbstractItemView, QListWidgetItem)
 
 SERVER_PUBLIC_KEY: Optional[bytes] = None
 
@@ -154,8 +155,12 @@ class ChatWindow(QMainWindow):
         # Layout for message deletion controls.
         deletion_layout = QHBoxLayout()
         deletion_layout.addWidget(QLabel("Your Messages:"))
-        self.message_dropdown = QComboBox(self)
-        deletion_layout.addWidget(self.message_dropdown)
+
+        # Instead of a dropdown, create a list widget that allows multi-selection:
+        self.message_list = QListWidget(self)
+        self.message_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        deletion_layout.addWidget(self.message_list)
+
         self.delete_message_button = QPushButton("Delete Selected Message", self)
         deletion_layout.addWidget(self.delete_message_button)
         main_layout.addLayout(deletion_layout)
@@ -232,21 +237,21 @@ class ChatWindow(QMainWindow):
         )
         send_packet_to_server(packet)
         self.message_edit.clear()
-
+    
     @pyqtSlot()
     def on_delete_message(self):
-        """Delete the message selected from the dropdown list."""
         if not self.logged_in:
             QMessageBox.warning(self, "Not logged in", "Please log in first.")
             return
-        message_id = self.message_dropdown.currentData()
-        if message_id is None:
-            QMessageBox.information(self, "No Selection", "No message selected for deletion.")
+        selected_items = self.message_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "No Selection", "No messages selected for deletion.")
             return
-
+        # Gather message IDs from the selected items.
+        message_ids = [item.data(Qt.UserRole) for item in self.message_list.selectedItems()]
         packet = ClientPacket(
-            type=MessageType.DELETE_MESSAGE,
-            data={"username": self.username, "message_id": message_id, "password": self.password}
+            type=MessageType.DELETE_MESSAGES,
+            data={"username": self.username, "message_ids": message_ids, "password": self.password}
         )
         send_packet_to_server(packet)
 
@@ -293,8 +298,12 @@ class ChatWindow(QMainWindow):
         Refresh the chat display, update the available users list,
         and update the dropdown listing of your own messages.
         """
+        selected_message_ids = set(
+            item.data(Qt.UserRole) for item in self.message_list.selectedItems()
+        )
+
         self.chat_display.clear()
-        self.message_dropdown.clear()
+        self.message_list.clear()
         user_messages = []
 
         try:
@@ -313,7 +322,12 @@ class ChatWindow(QMainWindow):
             tstamp = msg.timestamp.strftime("%H:%M:%S") if not isinstance(msg.timestamp, str) else msg.timestamp
             preview = msg.message if len(msg.message) <= 20 else msg.message[:20] + "..."
             display_text = f"[{tstamp}] {preview}"
-            self.message_dropdown.addItem(display_text, msg.message_id)
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.UserRole, msg.message_id)
+            self.message_list.addItem(item)
+
+            if msg.message_id in selected_message_ids:
+                item.setSelected(True)
 
         self.users_combobox.clear()
         if self.username:

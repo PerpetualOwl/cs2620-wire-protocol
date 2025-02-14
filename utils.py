@@ -24,6 +24,7 @@ class MessageType(str, Enum):
     ALL_MESSAGES = "all_messages"
     SEND_MESSAGE = "send_message"
     DELETE_MESSAGE = "delete_message"
+    DELETE_MESSAGES = "delete_messages"
     DELETE_ACCOUNT = "delete_account"
     MESSAGE_RECEIVED = "message_received"
     MESSAGE_DELETED = "message_deleted"
@@ -50,10 +51,12 @@ class ClientPacket(BaseModel):
             MessageType.REQUEST_PUBLIC_KEY: [],
             MessageType.REQUEST_MESSAGES: ["sender", "password"],
             MessageType.SEND_MESSAGE: ["sender", "recipient", "message", "password"],
-            MessageType.DELETE_MESSAGE: ["username", "message_id", "password"], # or sender and recipient
+            MessageType.DELETE_MESSAGE: ["username", "message_id", "password"],
+            MessageType.DELETE_MESSAGES: ["username", "message_ids", "password"],
             MessageType.DELETE_ACCOUNT: ["username", "password"],
             MessageType.CREATE_USER_REQUEST: ["username", "password"],
             MessageType.REQUEST_UNREAD_MESSAGES: ["username", "num_messages", "password"]
+            
         }
 
         if packet_type in required_fields:
@@ -346,7 +349,8 @@ PACKET_TYPE_CODES = {
     MessageType.CREATE_USER_RESPONSE: 12,
     MessageType.INITIAL_CHATDATA: 13,
     MessageType.REQUEST_UNREAD_MESSAGES: 14,
-    MessageType.UNREAD_MESSAGES_RESPONSE: 15
+    MessageType.UNREAD_MESSAGES_RESPONSE: 15,
+    MessageType.DELETE_MESSAGES: 16
 }
 PACKET_TYPE_CODES_REV = {v: k for k, v in PACKET_TYPE_CODES.items()}
 
