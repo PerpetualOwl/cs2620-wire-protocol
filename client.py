@@ -13,7 +13,8 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSlot
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTextBrowser, QLineEdit, QPushButton,
                              QInputDialog, QMessageBox, QLabel, QComboBox, 
-                             QListWidget, QAbstractItemView, QListWidgetItem)
+                             QListWidget, QAbstractItemView, QListWidgetItem,
+                             QCompleter)
 
 SERVER_PUBLIC_KEY: Optional[bytes] = None
 
@@ -130,13 +131,21 @@ class ChatWindow(QMainWindow):
         main_layout.addWidget(self.chat_display)
 
         # Available Users section.
+        self.available_users = []
         users_layout = QHBoxLayout()
         self.users_label = QLabel("Available Users:")
         users_layout.addWidget(self.users_label)
         self.users_combobox = QComboBox(self)
+        self.users_combobox.setEditable(True)                                    # <-- allow typing
+        # Create and set the completer with case-insensitive substring matching:
+        self.userCompleter = QCompleter([], self)
+        self.userCompleter.setCaseSensitivity(Qt.CaseInsensitive)
+        self.userCompleter.setFilterMode(Qt.MatchContains)
+        self.users_combobox.setCompleter(self.userCompleter)
         users_layout.addWidget(self.users_combobox)
         main_layout.addLayout(users_layout)
         self.users_combobox.activated[str].connect(self.on_user_selected)
+
 
         # Layout for sending messages.
         send_layout = QHBoxLayout()
@@ -329,12 +338,17 @@ class ChatWindow(QMainWindow):
             if msg.message_id in selected_message_ids:
                 item.setSelected(True)
 
-        self.users_combobox.clear()
         if self.username:
             available_users = sorted(user for user in chat_data.users if user != self.username)
         else:
             available_users = sorted(list(chat_data.users))
-        self.users_combobox.addItems(available_users)
+
+        if available_users != self.available_users:
+            self.available_users = available_users
+            self.users_combobox.clear()
+            
+            self.users_combobox.addItems(self.available_users)
+            self.userCompleter.model().setStringList(self.available_users)
 
     @pyqtSlot(str)
     def on_user_selected(self, selected_user: str):
