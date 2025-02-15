@@ -131,3 +131,53 @@ Verified that running the chat application across devices over network also work
 Added much more comprehensive testing and more detailed running instructions
 
 Used some tricks to emulate certain networking/socket features for better end-to-end testing
+
+## 2/14/25
+
+# Update 1
+Add the ability to narrow list of users down via searching functionality (wildtext filtering).
+
+# Update 2
+Let us compare our custom wire protocol to JSON. We will do the same actions on the client for both wire protocols.
+
+Here are packet lengths for our custom protol:
+Sending packet to ('127.0.0.1', 52566): MessageType.PUBLIC_KEY_RESPONSE
+Packet length is: 467
+Sending packet to ('127.0.0.1', 52566): MessageType.CREATE_USER_RESPONSE
+Packet length is: 43
+Sending packet to ('127.0.0.1', 52566): MessageType.INITIAL_CHATDATA
+Packet length is: 77
+Sending packet to ('127.0.0.1', 52580): MessageType.PUBLIC_KEY_RESPONSE
+Packet length is: 467
+Sending packet to ('127.0.0.1', 52566): MessageType.USER_ADDED
+Packet length is: 19
+Sending packet to ('127.0.0.1', 52580): MessageType.CREATE_USER_RESPONSE
+Packet length is: 43
+Sending packet to ('127.0.0.1', 52580): MessageType.INITIAL_CHATDATA
+Packet length is: 85
+Sending packet to ('127.0.0.1', 52580): MessageType.MESSAGE_RECEIVED
+Packet length is: 138
+Sending packet to ('127.0.0.1', 52566): MessageType.MESSAGE_RECEIVED
+Packet length is: 138
+
+Here are packet lengths for JSON:
+Sending packet to ('127.0.0.1', 52907): MessageType.PUBLIC_KEY_RESPONSE
+Packet length is: 519
+Sending packet to ('127.0.0.1', 52907): MessageType.CREATE_USER_RESPONSE
+Packet length is: 94
+Sending packet to ('127.0.0.1', 52907): MessageType.INITIAL_CHATDATA
+Packet length is: 135
+Sending packet to ('127.0.0.1', 52918): MessageType.PUBLIC_KEY_RESPONSE
+Packet length is: 519
+Sending packet to ('127.0.0.1', 52907): MessageType.USER_ADDED
+Packet length is: 53
+Sending packet to ('127.0.0.1', 52918): MessageType.CREATE_USER_RESPONSE
+Packet length is: 94
+Sending packet to ('127.0.0.1', 52918): MessageType.INITIAL_CHATDATA
+Packet length is: 144
+Sending packet to ('127.0.0.1', 52918): MessageType.MESSAGE_RECEIVED
+Packet length is: 194
+Sending packet to ('127.0.0.1', 52907): MessageType.MESSAGE_RECEIVED
+Packet length is: 194
+
+We can see that the custom protocol uses roughly 50 less bytes per package, which is pretty significant if most messages are quite short. Hence, our protocol is more efficient. On the other hand, we can note that our serialization starts with a byte representing packet type, which might not be scalable if more kinds of messages are sent between server and client. Backwards compatibility might be broken if we need another byte to represent packet type.

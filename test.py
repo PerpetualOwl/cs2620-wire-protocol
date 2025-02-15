@@ -292,13 +292,13 @@ class TestIntegration(unittest.TestCase):
     client connections to test full, end-to-end interactions.
     (We override utils.SERVER_IP and SERVER_PORT for testing.)
     """
-    TEST_PORT = 12000
+    TEST_PORT = 33259
     SERVER_STARTUP_WAIT = 1  # seconds
 
     @classmethod
     def setUpClass(cls):
         # Override global connection details.
-        utils.SERVER_IP = "127.0.0.1"
+        utils.SERVER_IP = ""
         utils.SERVER_PORT = cls.TEST_PORT
 
         # Reset server globals.

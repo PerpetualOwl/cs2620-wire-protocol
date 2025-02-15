@@ -15,7 +15,7 @@ load_dotenv(dotenv_path=".env")
 SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "12000"))
 
-USE_CUSTOM_WIRE_PROTOCOL = bool(os.getenv("USE_CUSTOM_WIRE_PROTOCOL"))
+USE_CUSTOM_WIRE_PROTOCOL = (os.getenv("USE_CUSTOM_WIRE_PROTOCOL", "") == "True")
 
 class MessageType(str, Enum):
     REQUEST_PUBLIC_KEY = "request_public_key"
