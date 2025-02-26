@@ -109,3 +109,10 @@ gRPC provides built-in error handling and status codes, making it easier to hand
 ```bash
 python -m grpc_tools.protoc --proto_path=. --python_out=. --grpc_python_out=. chat.proto
 ```
+
+to fix
+fix deletion ui
+fix logout hanging
+test load messages after logout
+generate unit tests
+forge notebook

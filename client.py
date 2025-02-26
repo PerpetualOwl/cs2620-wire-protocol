@@ -6,10 +6,11 @@ import time
 import uuid
 import re
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                            QLabel, QLineEdit, QPushButton, QTextEdit, QListWidget, 
+                            QLabel, QLineEdit, QPushButton, QTextEdit, QListWidget, QListWidgetItem,
                             QStackedWidget, QMessageBox, QInputDialog, QDialog, 
-                            QFormLayout, QSpinBox, QDialogButtonBox, QTabWidget)
+                            QFormLayout, QSpinBox, QDialogButtonBox, QTabWidget, QAbstractItemView)
 from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot, Qt
+from PyQt5.QtGui import QPixmap, QPalette, QBrush
 
 # Import the generated gRPC code
 import chat_pb2
@@ -98,11 +99,22 @@ class LoginDialog(QDialog):
             self.create_mode
         )
 
+class MessageListItem(QListWidgetItem):
+    """Custom list item to store message ID and display message info"""
+    def __init__(self, message):
+        display_text = f"From: {message.sender} - {time.ctime(message.timestamp)}\n{message.content[:50]}{'...' if len(message.content) > 50 else ''}"
+        super().__init__(display_text)
+        self.message_id = message.message_id
+        self.setToolTip(message.content)
+
 class ChatClient(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("gRPC Chat Client")
         self.resize(800, 600)
+        
+        # Set subway surfers background
+        self.set_background()
         
         # gRPC connection
         self.channel = None
@@ -153,10 +165,20 @@ class ChatClient(QMainWindow):
         self.messages_tab = QWidget()
         messages_layout = QVBoxLayout(self.messages_tab)
         
-        # Message display
+        # Message display section
+        display_layout = QHBoxLayout()
+        
+        # Message list for selection
+        self.message_list = QListWidget()
+        self.message_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        
+        # Message details
         self.message_display = QTextEdit()
         self.message_display.setReadOnly(True)
-        messages_layout.addWidget(self.message_display)
+        
+        display_layout.addWidget(self.message_list, 1)
+        display_layout.addWidget(self.message_display, 2)
+        messages_layout.addLayout(display_layout)
         
         # Message actions
         message_actions_layout = QHBoxLayout()
@@ -165,12 +187,14 @@ class ChatClient(QMainWindow):
         self.message_count_input.setMinimum(1)
         self.message_count_input.setMaximum(50)
         self.message_count_input.setValue(10)
+        self.delete_selected_button = QPushButton("Delete Selected")
         self.delete_messages_button = QPushButton("Delete All")
         
         message_actions_layout.addWidget(self.refresh_button)
         message_actions_layout.addWidget(QLabel("Count:"))
         message_actions_layout.addWidget(self.message_count_input)
         message_actions_layout.addStretch()
+        message_actions_layout.addWidget(self.delete_selected_button)
         message_actions_layout.addWidget(self.delete_messages_button)
         
         messages_layout.addLayout(message_actions_layout)
@@ -254,6 +278,7 @@ class ChatClient(QMainWindow):
         self.connect_button.clicked.connect(self.connect_to_server)
         self.logout_button.clicked.connect(self.logout)
         self.refresh_button.clicked.connect(self.get_messages)
+        self.delete_selected_button.clicked.connect(self.delete_selected_messages)
         self.delete_messages_button.clicked.connect(self.delete_all_messages)
         self.send_button.clicked.connect(self.send_message)
         self.list_users_button.clicked.connect(self.show_users_tab)
@@ -262,11 +287,34 @@ class ChatClient(QMainWindow):
         self.next_page_button.clicked.connect(self.next_page)
         self.delete_account_button.clicked.connect(self.delete_account)
         self.users_list.itemDoubleClicked.connect(self.select_user)
+        self.message_list.itemClicked.connect(self.display_message_content)
         
         # State variables
         self.current_page = 1
         self.total_pages = 1
         self.user_messages = []
+        self.messages_data = {}  # To store full message data
+    
+    def set_background(self):
+        """Set a subway surfers background for the application"""
+        try:
+            # You would need to have a subway surfers background image file
+            # This is a placeholder - replace with actual file path
+            background_image = QPixmap("subway_surfers_bg.jpg")
+            
+            # If you don't have the file, you can use a gradient as fallback
+            if background_image.isNull():
+                palette = QPalette()
+                palette.setColor(QPalette.Window, Qt.blue)
+                self.setPalette(palette)
+                print("Using fallback background color - place 'subway_surfers_bg.jpg' in app directory for image")
+            else:
+                palette = QPalette()
+                palette.setBrush(QPalette.Window, QBrush(background_image.scaled(
+                    self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
+                self.setPalette(palette)
+        except Exception as e:
+            print(f"Failed to set background: {e}")
         
     def connect_to_server(self):
         server_address = self.server_input.text()
@@ -334,11 +382,10 @@ class ChatClient(QMainWindow):
                 self.user_label.setText(f"Logged in as: {username}")
                 self.stacked_widget.setCurrentWidget(self.chat_widget)
                 
-                # Show unread messages
+                # Show notification about unread messages instead of loading them automatically
                 if response.unread_message_count > 0:
                     QMessageBox.information(self, "New Messages", 
-                                           f"You have {response.unread_message_count} unread messages.")
-                    self.get_messages()
+                                           f"You have {response.unread_message_count} unread messages. Click 'Get Messages' to view them.")
             else:
                 QMessageBox.warning(self, "Login Failed", response.message)
                 
@@ -359,31 +406,59 @@ class ChatClient(QMainWindow):
     @pyqtSlot(object)
     def handle_new_message(self, message):
         """Handle a new message from the server"""
+        # Add to message list
+        item = MessageListItem(message)
+        self.message_list.addItem(item)
+        
+        # Store full message data
+        self.messages_data[message.message_id] = message
+        
+        # Also display in the text view
         self.message_display.append(
             f"<b>From: {message.sender}</b> <i>({time.ctime(message.timestamp)})</i><br>"
             f"{message.content}<br>"
             f"------------------------------<br>"
         )
         
+    def display_message_content(self, item):
+        """Display the selected message content in the detail view"""
+        if isinstance(item, MessageListItem):
+            message = self.messages_data.get(item.message_id)
+            if message:
+                self.message_display.clear()
+                self.message_display.append(
+                    f"<b>From: {message.sender}</b> <i>({time.ctime(message.timestamp)})</i><br>"
+                    f"{message.content}<br>"
+                )
+        
     def logout(self):
-        # Stop message receiver
-        if self.message_receiver:
-            self.message_receiver.stop()
-            self.message_receiver.wait()
-            self.message_receiver = None
+        try:
+            # Stop message receiver first to prevent any thread issues
+            if self.message_receiver:
+                self.message_receiver.stop()
+                # Wait for the thread to finish but with a timeout
+                if not self.message_receiver.wait(1000):  # 1 second timeout
+                    print("Warning: Message receiver thread did not terminate cleanly")
+                self.message_receiver = None
+                
+            # Clear session data
+            self.username = None
+            self.session_token = None
             
-        # Clear session data
-        self.username = None
-        self.session_token = None
-        
-        # Clear UI
-        self.message_display.clear()
-        self.message_input.clear()
-        self.recipient_input.clear()
-        self.users_list.clear()
-        
-        # Show login screen
-        self.stacked_widget.setCurrentWidget(self.login_widget)
+            # Clear UI
+            self.message_display.clear()
+            self.message_list.clear()
+            self.message_input.clear()
+            self.recipient_input.clear()
+            self.users_list.clear()
+            self.messages_data.clear()
+            
+            # Show login screen
+            self.stacked_widget.setCurrentWidget(self.login_widget)
+        except Exception as e:
+            print(f"Error during logout: {e}")
+            # Even if there's an error, try to reset the UI
+            self.stacked_widget.setCurrentWidget(self.login_widget)
         
     def get_messages(self):
         if not self.session_token:
@@ -401,17 +476,22 @@ class ChatClient(QMainWindow):
             
             # Clear previous messages
             self.user_messages = []
+            self.message_list.clear()
+            self.messages_data.clear()
+            self.message_display.clear()
             
             # Display messages
             if response.messages:
-                self.message_display.clear()
                 for message in response.messages:
+                    # Add to message IDs list
                     self.user_messages.append(message.message_id)
-                    self.message_display.append(
-                        f"<b>From: {message.sender}</b> <i>({time.ctime(message.timestamp)})</i><br>"
-                        f"{message.content}<br>"
-                        f"------------------------------<br>"
-                    )
+                    
+                    # Add to message list widget
+                    item = MessageListItem(message)
+                    self.message_list.addItem(item)
+                    
+                    # Store full message data
+                    self.messages_data[message.message_id] = message
                     
                 if response.remaining_messages > 0:
                     QMessageBox.information(self, "More Messages", 
@@ -421,6 +501,52 @@ class ChatClient(QMainWindow):
                 
         except grpc.RpcError as e:
             QMessageBox.critical(self, "Error", f"Failed to get messages: {e}")
+    
+    def delete_selected_messages(self):
+        """Delete only the selected messages"""
+        selected_items = self.message_list.selectedItems()
+        
+        if not selected_items:
+            QMessageBox.information(self, "No Selection", "Please select messages to delete.")
+            return
+        
+        message_ids = [item.message_id for item in selected_items]
+        
+        reply = QMessageBox.question(self, "Confirm Deletion", 
+                                     f"Are you sure you want to delete {len(message_ids)} selected messages?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     
+        if reply == QMessageBox.Yes:
+            try:
+                request = chat_pb2.DeleteMessagesRequest(
+                    username=self.username,
+                    message_ids=message_ids,
+                    session_token=self.session_token
+                )
+                
+                response = self.stub.DeleteMessages(request)
+                
+                if response.success:
+                    # Fix: Use length of selected items to show the correct count
+                    QMessageBox.information(self, "Success", 
+                                          f"Deleted {len(message_ids)} messages.")
+                    
+                    # Remove deleted messages from UI and data structures
+                    for item in selected_items:
+                        msg_id = item.message_id
+                        row = self.message_list.row(item)
+                        self.message_list.takeItem(row)
+                        if msg_id in self.messages_data:
+                            del self.messages_data[msg_id]
+                        if msg_id in self.user_messages:
+                            self.user_messages.remove(msg_id)
+                    
+                    self.message_display.clear()
+                else:
+                    QMessageBox.warning(self, "Deletion Failed", response.message)
+                    
+            except grpc.RpcError as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete messages: {e}")
             
     def delete_all_messages(self):
         if not self.user_messages:
@@ -445,7 +571,9 @@ class ChatClient(QMainWindow):
                     QMessageBox.information(self, "Success", 
                                           f"Deleted {response.deleted_count} messages.")
                     self.message_display.clear()
+                    self.message_list.clear()
                     self.user_messages = []
+                    self.messages_data.clear()
                 else:
                     QMessageBox.warning(self, "Deletion Failed", response.message)
                     
@@ -556,6 +684,11 @@ class ChatClient(QMainWindow):
                         
                 except grpc.RpcError as e:
                     QMessageBox.critical(self, "Error", f"Failed to delete account: {e}")
+
+    # Override resize event to maintain background when window is resized
+    def resizeEvent(self, event):
+        self.set_background()
+        super().resizeEvent(event)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
