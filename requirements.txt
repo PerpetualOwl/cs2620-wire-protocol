@@ -1,4 +1,3 @@
-pydantic
-cryptography
+grpcio
+grpcio-tools
 PyQt5
-python-dotenv
