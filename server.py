@@ -231,12 +231,15 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             # Store message for later delivery
             self.messages[recipient].append(message)
             logger.info(f"Message from {sender} to {recipient} queued for later delivery")
-            
-        return chat_pb2.SendMessageResponse(
+        
+        
+        response =  chat_pb2.SendMessageResponse(
             success=True,
             message="Message sent",
             message_id=message_id
         )
+        print(len(response.SerializeToString()))
+        return response
         
     def GetMessages(self, request, context):
         username = request.username

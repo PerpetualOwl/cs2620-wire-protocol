@@ -43,7 +43,7 @@ This will generate the `chat_pb2.py` and `chat_pb2_grpc.py` files required for t
 1. Start the server:
 
 ```bash
-python chat_server.py
+python server.py
 ```
 
 The server will start on port 50051 by default.
@@ -51,7 +51,7 @@ The server will start on port 50051 by default.
 2. Launch the client:
 
 ```bash
-python chat_client.py
+python client.py
 ```
 
 The client will connect to the server on `localhost:50051` by default. You can change this in the client UI.
@@ -109,10 +109,3 @@ gRPC provides built-in error handling and status codes, making it easier to hand
 ```bash
 python -m grpc_tools.protoc --proto_path=. --python_out=. --grpc_python_out=. chat.proto
 ```
-
-to fix
-fix deletion ui
-fix logout hanging
-test load messages after logout
-generate unit tests
-forge notebook
