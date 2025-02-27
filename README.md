@@ -1,25 +1,111 @@
-# CS2620 Wire Protocol
+# gRPC Chat Application
 
-## Running Instructions
+This is a simple client-server chat application implemented using gRPC and PyQt5. The application allows users to create accounts, send and receive messages, list other users, and manage their account.
 
-1. Ensure a recent version of python is installed. Install venv on the system as well (in most default installations).
+## Features
 
-2. Copy sample.env to .env and fill in the desired parameters:
-    - SERVER_IP: Either 127.0.0.1 to test on your local system. If you are running over a network, make it empty string for the server and the ip address of the server's machine if you are the client.
-    - SERVER_PORT: Pick any port that isn't taken. Make sure it is the same for the server and client.
-    - USE_CUSTOM_WIRE_PROTOCOL: True or False whether to use json or a more optimized wire protocol.
+- Account management (create, login, delete)
+- Message operations (send, receive, delete)
+- Real-time message delivery using gRPC streaming
+- User listing with wildcard pattern matching
+- Password hashing for security
+- PyQt5 graphical interface
 
-3. On the server, run `make server`. On the client run `make client`. If testing on the local machine, run those in different shell sessions.
+## Requirements
 
-## Unit/Integration/Regression Testing
+- Python 3.6+
+- gRPC and gRPC tools
+- PyQt5
 
-All testing code is contained within `test.py` and running make test will show the result of the full testing suite.
+## Setup
 
-## Documentation
+1. Install required Python packages:
 
-General documentation is contained within `docs.md`.
+```bash
+pip install grpcio grpcio-tools PyQt5
+```
 
-The engineering notebook is contained within `notebook.md`.
+2. Generate gRPC code from proto file:
 
+```bash
+# Place chat.proto in the proto directory
+mkdir -p proto
+cp chat.proto proto/
 
+# Run the code generator script
+python generate_grpc.py
+```
 
+This will generate the `chat_pb2.py` and `chat_pb2_grpc.py` files required for the application.
+
+## Running the Application
+
+1. Start the server:
+
+```bash
+python server.py
+```
+
+The server will start on port 50051 by default.
+
+2. Launch the client:
+
+```bash
+python client.py
+```
+
+The client will connect to the server on `localhost:50051` by default. You can change this in the client UI.
+
+## File Structure
+
+- `chat.proto`: Protocol Buffer definition for the chat service
+- `chat_server.py`: Server implementation
+- `chat_client.py`: PyQt5 client implementation
+- `generate_grpc.py`: Helper script to generate gRPC code from proto file
+
+## gRPC vs Custom Wire Protocol/JSON
+
+### What has changed?
+
+#### Protocol Definition
+
+- With gRPC, the protocol is defined in a `.proto` file using Protocol Buffers.
+- The client and server code is generated from this definition.
+- This ensures consistent data structures and prevents errors.
+
+#### Implementation
+
+- The server implements the service defined in the proto file
+- The client connects to the server using gRPC stubs
+- Streaming is handled natively by gRPC
+
+#### Data Size
+
+gRPC uses Protocol Buffers which is a binary format, rather than JSON or a custom text-based protocol. This results in:
+- Smaller message sizes
+- Faster serialization/deserialization
+- Native support for streaming (used for real-time messages)
+
+#### Error Handling
+
+gRPC provides built-in error handling and status codes, making it easier to handle failures and edge cases.
+
+## Advantages of gRPC
+
+1. **Smaller message size**: Protocol Buffers are more compact than JSON
+2. **Type safety**: The protocol definition enforces types
+3. **Code generation**: Less boilerplate code needed
+4. **Bi-directional streaming**: Built-in support for streaming
+5. **HTTP/2**: Better performance with multiplexing and header compression
+
+## Disadvantages
+
+1. **Steeper learning curve**: More complex setup compared to simple sockets
+2. **Less human-readable**: Binary format is not human-readable like JSON
+3. **Requires code generation**: Changes to the protocol require regeneration of code
+
+## Generating the proto code if you modify chat.proto
+
+```bash
+python -m grpc_tools.protoc --proto_path=. --python_out=. --grpc_python_out=. chat.proto
+```

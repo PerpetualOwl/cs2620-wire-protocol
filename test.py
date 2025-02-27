@@ -1,565 +1,856 @@
 import unittest
-import json
-import struct
-import hashlib
-import socket
-import threading
 import time
 import uuid
+import threading
+import grpc
 import sys
 import os
-from datetime import datetime
+from unittest.mock import MagicMock, patch
+import tempfile
 
-# Import our application utilities.
-import utils
-from utils import (
-    ClientPacket,
-    ServerPacket,
-    ChatMessage,
-    ChatData,
-    MessageType,
-    hash_password,
-    generate_key_pair,
-    encrypt,
-    decrypt,
-    serialize_packet,
-    deserialize_packet,
-)
+# Import the application modules
+import chat_pb2
+import chat_pb2_grpc
+from server import ChatServicer, serve
+from client import ChatClient, LoginDialog, MessageReceiver, hash_password
 
-# Import the server module in order to run the integration tests.
-import server
+# PyQt5 imports for client testing
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtTest import QTest
+from PyQt5.QtCore import Qt, QTimer
 
-# =========================
-# Existing unit tests
-# =========================
-
-class TestSecureChat(unittest.TestCase):
-
+class TestChatServiceBasic(unittest.TestCase):
+    """Unit tests for basic ChatServicer functionality"""
+    
     def setUp(self):
-        # Generate a key pair for encryption/decryption tests.
-        self.private_key, self.public_key = generate_key_pair()
-        # Force JSON wire protocol in unit tests.
-        utils.USE_CUSTOM_WIRE_PROTOCOL = False
-
-    def tearDown(self):
-        utils.USE_CUSTOM_WIRE_PROTOCOL = False
-
-    # --------------------
-    # hash_password tests
-    # --------------------
+        self.servicer = ChatServicer()
+        # Create a mock context
+        self.context = MagicMock()
+        
+    def test_account_creation(self):
+        # Test creating a new account
+        request = chat_pb2.CreateAccountRequest(
+            username="testuser",
+            password_hash="hashed_password"
+        )
+        response = self.servicer.CreateAccount(request, self.context)
+        
+        self.assertTrue(response.success)
+        self.assertEqual(response.message, "Account created successfully")
+        self.assertFalse(response.account_exists)
+        self.assertIn("testuser", self.servicer.accounts)
+        
+    def test_duplicate_account_creation(self):
+        # Setup - Create account first
+        self.servicer.accounts["testuser"] = {"password_hash": "hashed_password"}
+        self.servicer.messages["testuser"] = []
+        
+        # Test creating a duplicate account
+        request = chat_pb2.CreateAccountRequest(
+            username="testuser",
+            password_hash="different_password"
+        )
+        response = self.servicer.CreateAccount(request, self.context)
+        
+        self.assertFalse(response.success)
+        self.assertTrue(response.account_exists)
+        
+    def test_login_success(self):
+        # Setup - Create account first
+        self.servicer.accounts["testuser"] = {"password_hash": "hashed_password"}
+        self.servicer.messages["testuser"] = []
+        
+        # Test login
+        request = chat_pb2.LoginRequest(
+            username="testuser",
+            password_hash="hashed_password"
+        )
+        response = self.servicer.Login(request, self.context)
+        
+        self.assertTrue(response.success)
+        self.assertEqual(response.message, "Login successful")
+        self.assertIn("testuser", self.servicer.online_users)
+        self.assertTrue(response.session_token)  # Should have a token
+        
+    def test_login_invalid_username(self):
+        # Test login with invalid username
+        request = chat_pb2.LoginRequest(
+            username="nonexistent",
+            password_hash="hashed_password"
+        )
+        response = self.servicer.Login(request, self.context)
+        
+        self.assertFalse(response.success)
+        self.assertEqual(response.message, "Invalid username")
+        
+    def test_login_invalid_password(self):
+        # Setup - Create account first
+        self.servicer.accounts["testuser"] = {"password_hash": "correct_password"}
+        self.servicer.messages["testuser"] = []
+        
+        # Test login with invalid password
+        request = chat_pb2.LoginRequest(
+            username="testuser",
+            password_hash="wrong_password"
+        )
+        response = self.servicer.Login(request, self.context)
+        
+        self.assertFalse(response.success)
+        self.assertEqual(response.message, "Invalid password")
+        
+    def test_session_validation(self):
+        # Setup a session
+        token = "test_token"
+        username = "testuser"
+        with self.servicer.session_lock:
+            self.servicer.sessions[token] = username
+            
+        # Test validation
+        self.assertTrue(self.servicer.validate_session(token))
+        self.assertTrue(self.servicer.validate_session(token, username))
+        self.assertFalse(self.servicer.validate_session(token, "wrong_user"))
+        self.assertFalse(self.servicer.validate_session("wrong_token"))
+        
+    def test_pattern_matching(self):
+        # Test wildcard pattern matching
+        self.assertTrue(self.servicer._match_pattern("user1", "user*"))
+        self.assertTrue(self.servicer._match_pattern("user123", "user???"))
+        self.assertFalse(self.servicer._match_pattern("admin", "user*"))
+        self.assertTrue(self.servicer._match_pattern("anything", ""))  # Empty pattern matches all
+        
+    def test_delete_account(self):
+        # Setup - Create account and session
+        username = "testuser"
+        password_hash = "hashed_password"
+        self.servicer.accounts[username] = {"password_hash": password_hash}
+        self.servicer.messages[username] = []
+        token = self.servicer._generate_session_token(username)
+        
+        # Test account deletion
+        request = chat_pb2.DeleteAccountRequest(
+            username=username,
+            password_hash=password_hash,
+            session_token=token
+        )
+        response = self.servicer.DeleteAccount(request, self.context)
+        
+        self.assertTrue(response.success)
+        self.assertNotIn(username, self.servicer.accounts)
+        self.assertNotIn(username, self.servicer.messages)
+        
+    def test_delete_account_invalid_password(self):
+        # Setup - Create account and session
+        username = "testuser"
+        password_hash = "hashed_password"
+        self.servicer.accounts[username] = {"password_hash": password_hash}
+        self.servicer.messages[username] = []
+        token = self.servicer._generate_session_token(username)
+        
+        # Test deletion with wrong password
+        request = chat_pb2.DeleteAccountRequest(
+            username=username,
+            password_hash="wrong_password",
+            session_token=token
+        )
+        response = self.servicer.DeleteAccount(request, self.context)
+        
+        self.assertFalse(response.success)
+        self.assertIn(username, self.servicer.accounts)
+        
+    def test_send_message(self):
+        # Setup - Create sender and recipient accounts
+        sender = "sender"
+        recipient = "recipient"
+        self.servicer.accounts[sender] = {"password_hash": "hash1"}
+        self.servicer.accounts[recipient] = {"password_hash": "hash2"}
+        self.servicer.messages[recipient] = []
+        token = self.servicer._generate_session_token(sender)
+        
+        # Test sending a message
+        request = chat_pb2.SendMessageRequest(
+            sender=sender,
+            recipient=recipient,
+            content="Hello!",
+            session_token=token
+        )
+        response = self.servicer.SendMessage(request, self.context)
+        
+        self.assertTrue(response.success)
+        self.assertEqual(len(self.servicer.messages[recipient]), 1)
+        self.assertEqual(self.servicer.messages[recipient][0].content, "Hello!")
+        
+    def test_list_accounts(self):
+        # Setup - Create multiple accounts
+        self.servicer.accounts = {
+            "user1": {"password_hash": "hash1"},
+            "user2": {"password_hash": "hash2"},
+            "admin": {"password_hash": "hash3"}
+        }
+        token = self.servicer._generate_session_token("user1")
+        
+        # Test listing accounts with pattern
+        request = chat_pb2.ListAccountsRequest(
+            pattern="user*",
+            page=1,
+            page_size=10,
+            session_token=token
+        )
+        response = self.servicer.ListAccounts(request, self.context)
+        
+        self.assertEqual(len(response.usernames), 2)
+        self.assertIn("user1", response.usernames)
+        self.assertIn("user2", response.usernames)
+        self.assertNotIn("admin", response.usernames)
+        
     def test_hash_password(self):
-        password = "securepassword"
+        # Test password hashing function
+        password = "password123"
         hashed = hash_password(password)
-        expected = hashlib.sha256(password.encode("utf-8")).hexdigest()
-        self.assertEqual(expected, hashed)
-        with self.assertRaises(ValueError):
-            hash_password(123)  # non-string input
-
-    # ---------------------
-    # generate_key_pair tests
-    # ---------------------
-    def test_generate_key_pair(self):
-        private_pem, public_pem = generate_key_pair()
-        self.assertIn(b"BEGIN PRIVATE KEY", private_pem)
-        self.assertIn(b"BEGIN PUBLIC KEY", public_pem)
-
-    # ---------------------
-    # Encryption/Decryption tests
-    # ---------------------
-    def test_encrypt_decrypt(self):
-        message = b"test message"
-        ciphertext = encrypt(self.public_key, message)
-        plaintext = decrypt(self.private_key, ciphertext)
-        self.assertEqual(message, plaintext)
-
-    def test_encrypt_invalid_public_key(self):
-        with self.assertRaises(Exception):
-            encrypt(b"not a valid PEM", b"message")
-
-    def test_decrypt_invalid_data(self):
-        with self.assertRaises(Exception):
-            decrypt(self.private_key, b"random invalid data")
-
-    # ---------------------
-    # Packet serialization (JSON mode)
-    # ---------------------
-    def test_serialize_deserialize_packet_json(self):
-        client_packet = ClientPacket(
-            type=MessageType.CREATE_USER_REQUEST,
-            data={"username": "testuser", "password": "testpass"},
-        )
-        serialized_packet = serialize_packet(client_packet)
-        deserialized_packet = deserialize_packet(serialized_packet, ClientPacket)
-        self.assertEqual(client_packet, deserialized_packet)
-
-        server_packet = ServerPacket(
-            type=MessageType.USER_ADDED,
-            data={"username": "testuser"},
-        )
-        serialized_packet = serialize_packet(server_packet)
-        deserialized_packet = deserialize_packet(serialized_packet, ServerPacket)
-        self.assertEqual(server_packet, deserialized_packet)
-
-    # ---------------------
-    # Packet serialization (custom TLV wire protocol)
-    # ---------------------
-    def test_serialize_deserialize_packet_custom_wire_protocol(self):
-        original_flag = utils.USE_CUSTOM_WIRE_PROTOCOL
-        utils.USE_CUSTOM_WIRE_PROTOCOL = True
-        try:
-            client_packet = ClientPacket(
-                type=MessageType.CREATE_USER_REQUEST,
-                data={"username": "customuser", "password": "custompass"},
-            )
-            serialized_packet = serialize_packet(client_packet)
-            deserialized_packet = deserialize_packet(serialized_packet, ClientPacket)
-            self.assertEqual(client_packet, deserialized_packet)
-
-            server_packet = ServerPacket(
-                type=MessageType.PUBLIC_KEY_RESPONSE, data={"public_key": "some_key"}
-            )
-            serialized_packet = serialize_packet(server_packet)
-            deserialized_packet = deserialize_packet(serialized_packet, ServerPacket)
-            self.assertEqual(server_packet, deserialized_packet)
-
-            # When data is None, it decodes to an empty dict.
-            client_packet = ClientPacket(
-                type=MessageType.REQUEST_PUBLIC_KEY, data=None
-            )
-            serialized_packet = serialize_packet(client_packet)
-            deserialized_packet = deserialize_packet(serialized_packet, ClientPacket)
-            self.assertEqual(deserialized_packet.data, {})
-        finally:
-            utils.USE_CUSTOM_WIRE_PROTOCOL = original_flag
-
-    def test_serialize_deserialize_packet_invalid_custom(self):
-        original_flag = utils.USE_CUSTOM_WIRE_PROTOCOL
-        utils.USE_CUSTOM_WIRE_PROTOCOL = True
-        try:
-            invalid_packet_bytes = struct.pack("!B", 255) + b"\x00"
-            with self.assertRaises(ValueError):
-                deserialize_packet(invalid_packet_bytes, ClientPacket)
-        finally:
-            utils.USE_CUSTOM_WIRE_PROTOCOL = original_flag
-
-    # ---------------------
-    # Model validator tests for Client/Server packets
-    # ---------------------
-    def test_client_packet_validator_missing_required_data(self):
-        with self.assertRaises(ValueError):
-            ClientPacket(
-                type=MessageType.SEND_MESSAGE, data={"sender": "Alice"}
-            )
-
-    def test_server_packet_validator_missing_required_data(self):
-        with self.assertRaises(ValueError):
-            ServerPacket(type=MessageType.USER_ADDED, data={})
-
-    # ---------------------
-    # ChatMessage tests
-    # ---------------------
-    def test_chat_message(self):
-        now = datetime.now()
-        msg = ChatMessage(
-            sender="Alice", recipient="Bob", message="Hello!", message_id="123", timestamp=now
-        )
-        self.assertEqual(msg.sender, "Alice")
-        self.assertEqual(msg.recipient, "Bob")
-        self.assertEqual(msg.message, "Hello!")
-
-        dumped = msg.model_dump()
-        self.assertIsInstance(dumped["timestamp"], str)
-        with self.assertRaises(ValueError):
-            ChatMessage(
-                sender="Alice",
-                recipient="Bob",
-                message="Hi",
-                message_id="456",
-                my_datetime="invalid-datetime",
-            )
-
-    def test_chat_message_datetime_parsing(self):
-        iso_time = "2023-10-31T13:45:00Z"
-        msg = ChatMessage(
-            sender="Alice", recipient="Bob", message="Hello", message_id="789", timestamp=datetime.now()
-        )
-        self.assertIsInstance(msg.timestamp, datetime)
-
-    # ---------------------
-    # ChatData tests
-    # ---------------------
-    def test_chat_data(self):
-        chat_data = ChatData()
-        chat_data.add_user("Alice")
-        self.assertIn("Alice", chat_data.users)
-
-        chat_data.add_user("Bob")
-        message = ChatMessage(
-            sender="Alice", recipient="Bob", message="Hi", message_id="1", timestamp=datetime.now()
-        )
-        chat_data.add_message(message)
-        self.assertIn("1", chat_data.messages)
-
-        # Adding a message automatically adds unknown users.
-        message2 = ChatMessage(
-            sender="Charlie", recipient="Dave", message="Hey", message_id="2", timestamp=datetime.now()
-        )
-        chat_data.add_message(message2)
-        self.assertIn("Charlie", chat_data.users)
-        self.assertIn("Dave", chat_data.users)
-
-        filtered = chat_data.get_messages("Alice")
-        self.assertIn("1", filtered.messages)
-        self.assertNotIn("2", filtered.messages)
         
-        # For backend deletion, if the provided sender is not authorized, it should return False.
-        result = chat_data.delete_message("Bob", "1", True)
-        self.assertFalse(result)
+        # Should be a valid SHA-256 hash (64 chars)
+        self.assertEqual(len(hashed), 64)
+        # Hashing should be consistent
+        self.assertEqual(hashed, hash_password(password))
+        # Different passwords should have different hashes
+        self.assertNotEqual(hashed, hash_password("different"))
 
-        # Valid deletion.
-        result = chat_data.delete_message("Alice", "1")
-        self.assertTrue(result)
-        self.assertNotIn("1", chat_data.messages)
 
-        # If message ID does not exist, return False.
-        result = chat_data.delete_message("Alice", "nonexistent")
-        self.assertFalse(result)
+class TestChatServiceMessages(unittest.TestCase):
+    """Unit tests for message-related functionality"""
+    
+    def setUp(self):
+        self.servicer = ChatServicer()
+        self.context = MagicMock()
         
-        self.assertTrue(chat_data.delete_user("Charlie"))
-        self.assertNotIn("Charlie", chat_data.users)
-        self.assertFalse(chat_data.delete_user("NonUser"))
-
-    def test_chat_data_model_dump_conversion(self):
-        chat_data = ChatData()
-        chat_data.add_user("Alice")
-        chat_data.add_user("Bob")
-        message = ChatMessage(
-            sender="Alice", recipient="Bob", message="Test", message_id="3", timestamp=datetime.now()
+        # Setup common test accounts
+        self.sender = "sender"
+        self.recipient = "recipient"
+        self.servicer.accounts[self.sender] = {"password_hash": "hash1"}
+        self.servicer.accounts[self.recipient] = {"password_hash": "hash2"}
+        self.servicer.messages[self.sender] = []
+        self.servicer.messages[self.recipient] = []
+        self.token = self.servicer._generate_session_token(self.sender)
+        
+    def test_get_messages_empty(self):
+        # Test getting messages when there are none
+        request = chat_pb2.GetMessagesRequest(
+            username=self.sender,
+            limit=10,
+            session_token=self.token
         )
-        chat_data.add_message(message)
-        dumped = chat_data.model_dump()
-        self.assertIsInstance(dumped["users"], list)
-        self.assertIsInstance(dumped["message_id_by_user"], dict)
-        for key, val in dumped["message_id_by_user"].items():
-            self.assertIsInstance(val, list)
-        for mid, msg in dumped["messages"].items():
-            self.assertIsInstance(msg["timestamp"], str)
-
-    # ---------------------
-    # Custom TLV encoding/decoding tests
-    # ---------------------
-    def test_custom_tlv_encoding_decoding(self):
-        original_flag = utils.USE_CUSTOM_WIRE_PROTOCOL
-        utils.USE_CUSTOM_WIRE_PROTOCOL = True
-        try:
-            nested_data = {
-                "key1": "value",
-                "key2": 123,
-                "key3": True,
-                "key4": 3.14,
-                "key5": [1, "two", False, {"nested": "yes"}],
-                "empty_list": [],
-                "empty_dict": {},
-                "username": "testuser",
-                "password": "testpass",
-            }
-            client_packet = ClientPacket(
-                type=MessageType.CREATE_USER_REQUEST, data=nested_data
+        response = self.servicer.GetMessages(request, self.context)
+        
+        self.assertEqual(len(response.messages), 0)
+        
+    def test_get_messages_with_content(self):
+        # Setup - Create some messages
+        for i in range(5):
+            message = chat_pb2.Message(
+                message_id=f"msg{i}",
+                sender=self.recipient,
+                recipient=self.sender,
+                content=f"Message {i}",
+                timestamp=int(time.time()),
+                read=False
             )
-            serialized_packet = serialize_packet(client_packet)
-            deserialized_packet = deserialize_packet(serialized_packet, ClientPacket)
-            self.assertEqual(client_packet, deserialized_packet)
-        finally:
-            utils.USE_CUSTOM_WIRE_PROTOCOL = original_flag
+            self.servicer.messages[self.sender].append(message)
+            
+        # Test getting messages
+        request = chat_pb2.GetMessagesRequest(
+            username=self.sender,
+            limit=3,  # Get only first 3
+            session_token=self.token
+        )
+        response = self.servicer.GetMessages(request, self.context)
+        
+        self.assertEqual(len(response.messages), 3)
+        self.assertEqual(response.remaining_messages, 2)
+        self.assertEqual(response.messages[0].content, "Message 0")
+        self.assertEqual(response.messages[2].content, "Message 2")
+        
+        # Messages should be marked as read
+        for msg in response.messages:
+            self.assertTrue(msg.read)
+            
+        # Messages should be removed from storage
+        self.assertEqual(len(self.servicer.messages[self.sender]), 2)
+        
+    def test_delete_messages(self):
+        # Setup - Create some messages
+        message_ids = []
+        for i in range(5):
+            msg_id = f"msg{i}"
+            message_ids.append(msg_id)
+            message = chat_pb2.Message(
+                message_id=msg_id,
+                sender=self.recipient,
+                recipient=self.sender,
+                content=f"Message {i}",
+                timestamp=int(time.time()),
+                read=False
+            )
+            self.servicer.messages[self.sender].append(message)
+            
+        # Test deleting specific messages
+        request = chat_pb2.DeleteMessagesRequest(
+            username=self.sender,
+            message_ids=message_ids[1:3],  # Delete messages 1 and 2
+            session_token=self.token
+        )
+        response = self.servicer.DeleteMessages(request, self.context)
+        
+        self.assertTrue(response.success)
+        self.assertEqual(response.deleted_count, 2)
+        self.assertEqual(len(self.servicer.messages[self.sender]), 3)
+        
+        # Check that the right messages were deleted
+        remaining_ids = [msg.message_id for msg in self.servicer.messages[self.sender]]
+        self.assertIn("msg0", remaining_ids)
+        self.assertNotIn("msg1", remaining_ids)
+        self.assertNotIn("msg2", remaining_ids)
+        self.assertIn("msg3", remaining_ids)
+        self.assertIn("msg4", remaining_ids)
+        
+    def test_delete_all_messages(self):
+        # Setup - Create some messages
+        message_ids = []
+        for i in range(5):
+            msg_id = f"msg{i}"
+            message_ids.append(msg_id)
+            message = chat_pb2.Message(
+                message_id=msg_id,
+                sender=self.recipient,
+                recipient=self.sender,
+                content=f"Message {i}",
+                timestamp=int(time.time()),
+                read=False
+            )
+            self.servicer.messages[self.sender].append(message)
+            
+        # Test deleting all messages
+        request = chat_pb2.DeleteMessagesRequest(
+            username=self.sender,
+            message_ids=message_ids,
+            session_token=self.token
+        )
+        response = self.servicer.DeleteMessages(request, self.context)
+        
+        self.assertTrue(response.success)
+        self.assertEqual(response.deleted_count, 5)
+        self.assertEqual(len(self.servicer.messages[self.sender]), 0)
 
-    # ---------------------
-    # Test deserialization of invalid JSON input.
-    # ---------------------
-    def test_deserialize_packet_invalid_json(self):
-        utils.USE_CUSTOM_WIRE_PROTOCOL = False
-        invalid_json_bytes = b"{invalid json}"
-        with self.assertRaises(ValueError):
-            deserialize_packet(invalid_json_bytes, ClientPacket)
+class TestMessageReceiver(unittest.TestCase):
+    """Tests for the client-side message receiver thread"""
+    
+    def setUp(self):
+        self.stub = MagicMock()
+        self.username = "testuser"
+        self.session_token = "testsession"
+        
+    def test_message_receiver_init(self):
+        # Test initialization
+        receiver = MessageReceiver(self.stub, self.username, self.session_token)
+        self.assertEqual(receiver.username, self.username)
+        self.assertEqual(receiver.session_token, self.session_token)
+        self.assertTrue(receiver.running)
+        
+    @patch('time.sleep', return_value=None)  # Mock sleep to speed up the test
+    def test_message_receiver_run(self, mock_sleep):
+        # Setup mock response for ReceiveMessages
+        test_message = chat_pb2.Message(
+            message_id="testmsg",
+            sender="sender",
+            recipient=self.username,
+            content="Test message",
+            timestamp=int(time.time()),
+            read=False
+        )
+        self.stub.ReceiveMessages.return_value = [test_message]
+        
+        # Create and start receiver
+        receiver = MessageReceiver(self.stub, self.username, self.session_token)
+        
+        # Mock the emit signal
+        receiver.message_received = MagicMock()
+        
+        # Run in a separate thread that we can control
+        thread = threading.Thread(target=receiver.run)
+        thread.daemon = True
+        thread.start()
+        
+        # Wait a bit for the receiver to process
+        time.sleep(0.1)
+        
+        # Stop the receiver
+        receiver.stop()
+        thread.join(timeout=1)
+        
+        # Verify the stub was called correctly
+        self.stub.ReceiveMessages.assert_called_once()
+        request = self.stub.ReceiveMessages.call_args[0][0]
+        self.assertEqual(request.username, self.username)
+        self.assertEqual(request.session_token, self.session_token)
+        
+        # Verify message was emitted
+        receiver.message_received.emit.assert_called_with(test_message)
 
-
-# =========================
-# Integration and regression tests
-# =========================
 
 class TestIntegration(unittest.TestCase):
-    """
-    Integration tests run a server (in a daemon thread) and then create fake
-    client connections to test full, end-to-end interactions.
-    (We override utils.SERVER_IP and SERVER_PORT for testing.)
-    """
-    TEST_PORT = 33259
-    SERVER_STARTUP_WAIT = 1  # seconds
-
+    """Integration tests for server and client interaction"""
+    
     @classmethod
     def setUpClass(cls):
-        # Override global connection details.
-        utils.SERVER_IP = ""
-        utils.SERVER_PORT = cls.TEST_PORT
-
-        # Reset server globals.
-        with server.global_lock:
-            server.chat_data = ChatData()
-            server.users.clear()
-            server.authed_clients.clear()
-            server.clients.clear()
-
-        # Start the server in a daemon thread.
-        cls.server_thread = threading.Thread(target=server.main, daemon=True)
+        # Start the server in a separate thread
+        cls.server_thread = threading.Thread(target=serve)
+        cls.server_thread.daemon = True
         cls.server_thread.start()
-        time.sleep(cls.SERVER_STARTUP_WAIT)
+        
+        # Wait for server to start
+        time.sleep(1)
+        
+        # Create gRPC channel and stub for tests
+        cls.channel = grpc.insecure_channel('localhost:50051')
+        cls.stub = chat_pb2_grpc.ChatServiceStub(cls.channel)
+        
+    def setUp(self):
+        # Generate unique usernames for each test
+        self.test_id = str(uuid.uuid4())[:8]
+        self.username1 = f"user1_{self.test_id}"
+        self.username2 = f"user2_{self.test_id}"
+        self.password = "testpass"
+        self.password_hash = hash_password(self.password)
+        
+    def test_account_lifecycle(self):
+        # 1. Create accounts
+        create_response1 = self.stub.CreateAccount(chat_pb2.CreateAccountRequest(
+            username=self.username1,
+            password_hash=self.password_hash
+        ))
+        self.assertTrue(create_response1.success)
+        
+        create_response2 = self.stub.CreateAccount(chat_pb2.CreateAccountRequest(
+            username=self.username2,
+            password_hash=self.password_hash
+        ))
+        self.assertTrue(create_response2.success)
+        
+        # 2. Login to accounts
+        login_response1 = self.stub.Login(chat_pb2.LoginRequest(
+            username=self.username1,
+            password_hash=self.password_hash
+        ))
+        self.assertTrue(login_response1.success)
+        session_token1 = login_response1.session_token
+        
+        login_response2 = self.stub.Login(chat_pb2.LoginRequest(
+            username=self.username2,
+            password_hash=self.password_hash
+        ))
+        self.assertTrue(login_response2.success)
+        session_token2 = login_response2.session_token
+        
+        # 3. Send messages between users
+        send_response = self.stub.SendMessage(chat_pb2.SendMessageRequest(
+            sender=self.username1,
+            recipient=self.username2,
+            content=f"Hello from {self.username1}!",
+            session_token=session_token1
+        ))
+        self.assertTrue(send_response.success)
+        message_id = send_response.message_id
+        
+        # 4. Get messages
+        get_response = self.stub.GetMessages(chat_pb2.GetMessagesRequest(
+            username=self.username2,
+            limit=10,
+            session_token=session_token2
+        ))
+        self.assertEqual(len(get_response.messages), 1)
+        self.assertEqual(get_response.messages[0].content, f"Hello from {self.username1}!")
+        
+        # 5. Delete messages
+        delete_response = self.stub.DeleteMessages(chat_pb2.DeleteMessagesRequest(
+            username=self.username2,
+            message_ids=[message_id],
+            session_token=session_token2
+        ))
+        self.assertTrue(delete_response.success)
+        
+        # 6. List accounts
+        list_response = self.stub.ListAccounts(chat_pb2.ListAccountsRequest(
+            pattern=f"user*_{self.test_id}",
+            page=1,
+            page_size=10,
+            session_token=session_token1
+        ))
+        self.assertEqual(len(list_response.usernames), 2)
+        self.assertIn(self.username1, list_response.usernames)
+        self.assertIn(self.username2, list_response.usernames)
+        
+        # 7. Delete accounts
+        delete_account_response1 = self.stub.DeleteAccount(chat_pb2.DeleteAccountRequest(
+            username=self.username1,
+            password_hash=self.password_hash,
+            session_token=session_token1
+        ))
+        self.assertTrue(delete_account_response1.success)
+        
+        delete_account_response2 = self.stub.DeleteAccount(chat_pb2.DeleteAccountRequest(
+            username=self.username2,
+            password_hash=self.password_hash,
+            session_token=session_token2
+        ))
+        self.assertTrue(delete_account_response2.success)
+        
+    def test_real_time_messaging(self):
+        # 1. Create accounts
+        self.stub.CreateAccount(chat_pb2.CreateAccountRequest(
+            username=self.username1,
+            password_hash=self.password_hash
+        ))
+        self.stub.CreateAccount(chat_pb2.CreateAccountRequest(
+            username=self.username2,
+            password_hash=self.password_hash
+        ))
+        
+        # 2. Login to accounts
+        login_response1 = self.stub.Login(chat_pb2.LoginRequest(
+            username=self.username1,
+            password_hash=self.password_hash
+        ))
+        session_token1 = login_response1.session_token
+        
+        login_response2 = self.stub.Login(chat_pb2.LoginRequest(
+            username=self.username2,
+            password_hash=self.password_hash
+        ))
+        session_token2 = login_response2.session_token
+        
+        # 3. Start receiving messages for user2
+        receive_request = chat_pb2.ReceiveMessagesRequest(
+            username=self.username2,
+            session_token=session_token2
+        )
+        
+        # Use a queue to store messages received in the background thread
+        received_messages = []
+        stop_event = threading.Event()
+        
+        def receive_messages():
+            try:
+                for message in self.stub.ReceiveMessages(receive_request):
+                    received_messages.append(message)
+                    if stop_event.is_set():
+                        break
+            except Exception as e:
+                print(f"Error in receive_messages: {e}")
+                
+        # Start the receiver thread
+        receiver_thread = threading.Thread(target=receive_messages)
+        receiver_thread.daemon = True
+        receiver_thread.start()
+        
+        # Give the stream time to set up
+        time.sleep(0.5)
+        
+        # 4. Send messages from user1 to user2
+        test_message = f"Real-time message from {self.username1}"
+        self.stub.SendMessage(chat_pb2.SendMessageRequest(
+            sender=self.username1,
+            recipient=self.username2,
+            content=test_message,
+            session_token=session_token1
+        ))
+        
+        # Give the message time to be delivered
+        time.sleep(0.5)
+        
+        # 5. Stop the receiver thread
+        stop_event.set()
+        
+        # 6. Verify the message was received
+        self.assertEqual(len(received_messages), 1)
+        self.assertEqual(received_messages[0].content, test_message)
+        
+        # 7. Clean up
+        self.stub.DeleteAccount(chat_pb2.DeleteAccountRequest(
+            username=self.username1,
+            password_hash=self.password_hash,
+            session_token=session_token1
+        ))
+        self.stub.DeleteAccount(chat_pb2.DeleteAccountRequest(
+            username=self.username2,
+            password_hash=self.password_hash,
+            session_token=session_token2
+        ))
 
+
+# We'll use PyQt5's QApplication instance for UI tests
+app = None
+
+class TestLoginDialog(unittest.TestCase):
+    """Tests for the LoginDialog UI component"""
+    
     @classmethod
-    def tearDownClass(cls):
-        pass  # Optionally restore original values.
+    def setUpClass(cls):
+        global app
+        # Create QApplication instance
+        if QApplication.instance() is None:
+            app = QApplication(sys.argv)
+        else:
+            app = QApplication.instance()
+    
+    def setUp(self):
+        self.dialog = LoginDialog()
+        
+    def test_login_mode(self):
+        # Test initial state
+        self.assertFalse(self.dialog.create_mode)
+        
+        # Fill in credentials
+        self.dialog.username_input.setText("testuser")
+        self.dialog.password_input.setText("testpass")
+        
+        # Simulate login button click
+        QTest.mouseClick(self.dialog.login_button, Qt.LeftButton)
+        
+        # Check credentials and mode
+        username, password_hash, create_mode = self.dialog.get_credentials()
+        self.assertEqual(username, "testuser")
+        self.assertEqual(password_hash, hash_password("testpass"))
+        self.assertFalse(create_mode)
+        
+    def test_create_account_mode(self):
+        # Fill in credentials
+        self.dialog.username_input.setText("newuser")
+        self.dialog.password_input.setText("newpass")
+        
+        # Simulate create account button click
+        QTest.mouseClick(self.dialog.create_button, Qt.LeftButton)
+        
+        # Check credentials and mode
+        username, password_hash, create_mode = self.dialog.get_credentials()
+        self.assertEqual(username, "newuser")
+        self.assertEqual(password_hash, hash_password("newpass"))
+        self.assertTrue(create_mode)
 
-    # Define FakeClient to mimic a real client.
-    class FakeClient:
-        def __init__(self):
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(2)
-            self.sock.connect((utils.SERVER_IP, utils.SERVER_PORT))
-            self.server_public_key = None
-            self.username = None
-            self.password = None  # hashed password
 
-        def request_public_key(self):
-            packet = ClientPacket(type=MessageType.REQUEST_PUBLIC_KEY, data={})
-            # Public key request is unencrypted.
-            data = serialize_packet(packet)
-            self.sock.sendall(data)
-            rsp = self.sock.recv(65536)
-            spacket = deserialize_packet(rsp, ServerPacket)
-            if spacket.type == MessageType.PUBLIC_KEY_RESPONSE:
-                self.server_public_key = spacket.data["public_key"].encode("utf-8")
-            return spacket
+@unittest.skipIf(QApplication.instance() is None, "Requires QApplication")
+class TestChatClientUI(unittest.TestCase):
+    """Tests for the ChatClient UI without actual server communication"""
+    
+    @classmethod
+    def setUpClass(cls):
+        global app
+        # Create QApplication instance if needed
+        if QApplication.instance() is None:
+            app = QApplication(sys.argv)
+        else:
+            app = QApplication.instance()
+    
+    def setUp(self):
+        # Create the client with mocked server connection
+        self.client = ChatClient()
+        self.client.stub = MagicMock()
+        self.client.session_token = "test_token"
+        self.client.username = "testuser"
+        
+    def test_initial_state(self):
+        # Test initial window state
+        self.assertEqual(self.client.windowTitle(), "gRPC Chat Client")
+        self.assertEqual(self.client.stacked_widget.currentWidget(), self.client.login_widget)
+        
+    def test_display_message_content(self):
+        # Create a mock message and message list item
+        message = chat_pb2.Message(
+            message_id="test_id",
+            sender="sender",
+            recipient="recipient", 
+            content="Test message content",
+            timestamp=int(time.time()),
+            read=False
+        )
+        
+        # Store the message in the client's message data dict
+        self.client.messages_data["test_id"] = message
+        
+        # Create a mock MessageListItem
+        class MockItem:
+            def __init__(self):
+                self.message_id = "test_id"
+                
+        mock_item = MockItem()
+        
+        # Call the display message method
+        self.client.display_message_content(mock_item)
+        
+        # Check that the message display was updated
+        display_text = self.client.message_display.toPlainText()
+        self.assertIn("Test message content", display_text)
+        self.assertIn("sender", display_text)
+        
+    def test_show_users_tab(self):
+        # Mock the search_users method
+        self.client.search_users = MagicMock()
+        
+        # Call the method
+        self.client.show_users_tab()
+        
+        # Check that the tab was changed and search method called
+        self.assertEqual(self.client.tabs.currentWidget(), self.client.users_tab)
+        self.client.search_users.assert_called_once()
+        
+    def test_send_message(self):
+        # Set up the test with recipient and content
+        self.client.recipient_input.setText("recipient")
+        self.client.message_input.setPlainText("Hello, recipient!")
+        
+        # Mock the stub's SendMessage method
+        self.client.stub.SendMessage.return_value = chat_pb2.SendMessageResponse(
+            success=True,
+            message="Message sent",
+            message_id="new_msg_id"
+        )
+        
+        # Mock QMessageBox.information to avoid dialog
+        with patch('PyQt5.QtWidgets.QMessageBox.information', return_value=None):
+            # Call the send message method
+            self.client.send_message()
+            
+        # Verify the stub was called with correct parameters
+        self.client.stub.SendMessage.assert_called_once()
+        request = self.client.stub.SendMessage.call_args[0][0]
+        self.assertEqual(request.sender, "testuser")
+        self.assertEqual(request.recipient, "recipient")
+        self.assertEqual(request.content, "Hello, recipient!")
+        self.assertEqual(request.session_token, "test_token")
+        
+        # Verify the message input was cleared
+        self.assertEqual(self.client.message_input.toPlainText(), "")
+        
+    def test_select_user(self):
+        # Create a mock list item
+        class MockUserItem:
+            def text(self):
+                return "selected_user"
+                
+        mock_item = MockUserItem()
+        
+        # Call the method
+        self.client.select_user(mock_item)
+        
+        # Check that the recipient was set and tab changed
+        self.assertEqual(self.client.recipient_input.text(), "selected_user")
+        self.assertEqual(self.client.tabs.currentWidget(), self.client.send_tab)
 
-        def send_encrypted_packet(self, packet: ClientPacket):
-            if self.server_public_key is None:
-                raise ValueError("Server public key not available.")
-            data = encrypt(self.server_public_key, serialize_packet(packet))
-            self.sock.sendall(data)
 
-        def recv_packet(self):
-            data = self.sock.recv(65536)
-            return deserialize_packet(data, ServerPacket)
-
-        def expect_packet(self, expected_type, timeout=2):
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                try:
-                    packet = self.recv_packet()
-                except socket.timeout:
-                    continue
-                if packet.type == expected_type:
-                    return packet
-                # Discard any unexpected broadcast packets.
-            raise Exception(f"Expected packet type {expected_type} not received in time.")
-
-        def create_user(self, username, password):
-            self.username = username
-            self.password = hash_password(password)
-            packet = ClientPacket(
-                type=MessageType.CREATE_USER_REQUEST,
-                data={"username": username, "password": self.password},
+class TestRegressionIssues(unittest.TestCase):
+    """Tests for specific regression issues that have been fixed"""
+    
+    def setUp(self):
+        # For regression tests we use a fresh servicer instance
+        self.servicer = ChatServicer()
+        self.context = MagicMock()
+        self.context.is_active.return_value = True
+    
+    def test_delete_account_removes_sender_messages(self):
+        # Create two accounts A and B
+        usernameA = "A_reg"
+        usernameB = "B_reg"
+        password_hash = "hashed"
+        
+        self.servicer.accounts[usernameA] = {"password_hash": password_hash}
+        self.servicer.messages[usernameA] = []
+        self.servicer.accounts[usernameB] = {"password_hash": password_hash}
+        self.servicer.messages[usernameB] = []
+        
+        # Generate sessions
+        tokenA = self.servicer._generate_session_token(usernameA)
+        tokenB = self.servicer._generate_session_token(usernameB)
+        
+        # Send message from A to B
+        send_req = chat_pb2.SendMessageRequest(
+            sender=usernameA,
+            recipient=usernameB,
+            content="Message from A to B",
+            session_token=tokenA
+        )
+        send_response = self.servicer.SendMessage(send_req, self.context)
+        self.assertTrue(send_response.success)
+        self.assertEqual(len(self.servicer.messages[usernameB]), 1)
+        
+        # Delete account A
+        delete_req = chat_pb2.DeleteAccountRequest(
+            username=usernameA,
+            password_hash=password_hash,
+            session_token=tokenA
+        )
+        del_response = self.servicer.DeleteAccount(delete_req, self.context)
+        self.assertTrue(del_response.success)
+        
+        # Ensure that in account B's messages, no message from A remains
+        for msg in self.servicer.messages[usernameB]:
+            self.assertNotEqual(msg.sender, usernameA)
+    
+    def test_get_messages_multiple_calls(self):
+        # Create an account with several messages and verify GetMessages clears them out gradually.
+        username = "userC_reg"
+        password_hash = "hashed"
+        self.servicer.accounts[username] = {"password_hash": password_hash}
+        self.servicer.messages[username] = []
+        token = self.servicer._generate_session_token(username)
+        
+        # Insert 5 messages
+        for i in range(5):
+            msg = chat_pb2.Message(
+                message_id=str(uuid.uuid4()),
+                sender="sender_reg",
+                recipient=username,
+                content=f"Message {i}",
+                timestamp=int(time.time()),
+                read=False
             )
-            self.send_encrypted_packet(packet)
-            return self.expect_packet(MessageType.CREATE_USER_RESPONSE)
+            self.servicer.messages[username].append(msg)
+        
+        # First call: retrieve 3 messages
+        request1 = chat_pb2.GetMessagesRequest(
+            username=username,
+            limit=3,
+            session_token=token
+        )
+        response1 = self.servicer.GetMessages(request1, self.context)
+        self.assertEqual(len(response1.messages), 3)
+        self.assertEqual(response1.remaining_messages, 2)
+        
+        # Second call: should retrieve the remaining 2 messages (if any)
+        request2 = chat_pb2.GetMessagesRequest(
+            username=username,
+            limit=3,
+            session_token=token
+        )
+        response2 = self.servicer.GetMessages(request2, self.context)
+        self.assertEqual(len(response2.messages), 2)
+    
+    def test_logout_cleanup_regression(self):
+        # Simulate a logout cleanup scenario where a user’s message queue is removed.
+        username = "userD_reg"
+        password_hash = "hashed"
+        self.servicer.accounts[username] = {"password_hash": password_hash, "online": True}
+        self.servicer.messages[username] = []
+        
+        # Simulate an online user with a dummy message queue
+        dummy_queue = []
+        self.servicer.online_users[username] = [dummy_queue]
+        
+        # Simulate the cleanup that happens in the ReceiveMessages finally clause:
+        if username in self.servicer.online_users and dummy_queue in self.servicer.online_users[username]:
+            self.servicer.online_users[username].remove(dummy_queue)
+            if not self.servicer.online_users[username]:
+                del self.servicer.online_users[username]
+                self.servicer.accounts[username]["online"] = False
+        
+        self.assertNotIn(username, self.servicer.online_users)
+        self.assertFalse(self.servicer.accounts[username]["online"])
 
-        def send_message(self, recipient, message):
-            packet = ClientPacket(
-                type=MessageType.SEND_MESSAGE,
-                data={"sender": self.username, "recipient": recipient, "message": message, "password": self.password},
-            )
-            self.send_encrypted_packet(packet)
-            return self.expect_packet(MessageType.MESSAGE_RECEIVED)
-
-        def request_messages(self):
-            packet = ClientPacket(
-                type=MessageType.REQUEST_MESSAGES,
-                data={"sender": self.username, "password": self.password},
-            )
-            self.send_encrypted_packet(packet)
-            return self.expect_packet(MessageType.INITIAL_CHATDATA)
-
-        def request_unread_messages(self, num_messages):
-            packet = ClientPacket(
-                type=MessageType.REQUEST_UNREAD_MESSAGES,
-                data={"username": self.username, "num_messages": str(num_messages), "password": self.password},
-            )
-            self.send_encrypted_packet(packet)
-            return self.expect_packet(MessageType.UNREAD_MESSAGES_RESPONSE)
-
-        def delete_message(self, message_id):
-            packet = ClientPacket(
-                type=MessageType.DELETE_MESSAGE,
-                data={"username": self.username, "message_id": message_id, "password": self.password},
-            )
-            self.send_encrypted_packet(packet)
-            return self.expect_packet(MessageType.MESSAGE_DELETED)
-
-        def delete_account(self):
-            packet = ClientPacket(
-                type=MessageType.DELETE_ACCOUNT,
-                data={"username": self.username, "password": self.password},
-            )
-            self.send_encrypted_packet(packet)
-            return self.expect_packet(MessageType.USER_DELETED)
-
-        def close(self):
-            self.sock.close()
-
-    # ---------------------
-    # Integration test cases
-    # ---------------------
-    def test_create_user(self):
-        client = self.FakeClient()
-        rsp = client.request_public_key()
-        self.assertEqual(rsp.type, MessageType.PUBLIC_KEY_RESPONSE)
-        rsp2 = client.create_user("Alice", "alicepwd")
-        self.assertEqual(rsp2.type, MessageType.CREATE_USER_RESPONSE)
-        self.assertTrue(rsp2.data.get("success"))
-        self.assertIn("created", rsp2.data.get("message").lower())
-        self.assertIn("Alice", server.users)
-        client.close()
-
-    def test_create_existing_user_login(self):
-        # First client creates user Bob.
-        client1 = self.FakeClient()
-        client1.request_public_key()
-        rsp_create = client1.create_user("Bob", "bobpwd")
-        self.assertTrue(rsp_create.data.get("success"))
-        client1.close()
-
-        # Second client logs in with the same credentials.
-        client2 = self.FakeClient()
-        client2.request_public_key()
-        rsp_login = client2.create_user("Bob", "bobpwd")
-        self.assertTrue(rsp_login.data.get("success"))
-        self.assertIn("logged in", rsp_login.data.get("message").lower())
-        client2.close()
-
-    def test_send_message_online(self):
-        clientA = self.FakeClient()
-        clientB = self.FakeClient()
-        clientA.request_public_key()
-        clientB.request_public_key()
-        rspA = clientA.create_user("Alice", "alicepwd")
-        rspB = clientB.create_user("Charlie", "charliepwd")
-        rsp_msg_A = clientA.send_message("Charlie", "Hello Charlie")
-        self.assertEqual(rsp_msg_A.type, MessageType.MESSAGE_RECEIVED)
-        msg_data = rsp_msg_A.data
-        self.assertEqual(msg_data.get("sender"), "Alice")
-        self.assertEqual(msg_data.get("recipient"), "Charlie")
-        self.assertEqual(msg_data.get("message"), "Hello Charlie")
-        # ClientB should also eventually get a MESSAGE_RECEIVED broadcast.
-        rsp_msg_B = clientB.expect_packet(MessageType.MESSAGE_RECEIVED)
-        self.assertEqual(rsp_msg_B.data.get("sender"), "Alice")
-        self.assertEqual(rsp_msg_B.data.get("recipient"), "Charlie")
-        self.assertEqual(rsp_msg_B.data.get("message"), "Hello Charlie")
-        clientA.close()
-        clientB.close()
-
-    def test_send_message_offline_and_unread(self):
-        # David stays online while Eve disconnects.
-        clientA = self.FakeClient()
-        clientA.request_public_key()
-        rspA = clientA.create_user("David", "davidpwd")
-        self.assertTrue(rspA.data.get("success"))
-
-        clientB = self.FakeClient()
-        clientB.request_public_key()
-        rspB = clientB.create_user("Eve", "evepwd")
-        self.assertTrue(rspB.data.get("success"))
-        clientB.close()  # Eve goes offline
-
-        # David sends a message to Eve.
-        rsp_msg = clientA.send_message("Eve", "Hello Eve")
-        self.assertEqual(rsp_msg.type, MessageType.MESSAGE_RECEIVED)
-
-        # Reconnect Eve.
-        clientB_new = self.FakeClient()
-        clientB_new.request_public_key()
-        rsp_login = clientB_new.create_user("Eve", "evepwd")
-        self.assertTrue(rsp_login.data.get("success"))
-        self.assertIn("unread", rsp_login.data.get("message").lower())
-        rsp_unread = clientB_new.request_unread_messages(1)
-        self.assertEqual(rsp_unread.type, MessageType.UNREAD_MESSAGES_RESPONSE)
-        messages = rsp_unread.data.get("messages")
-        self.assertIsInstance(messages, list)
-        self.assertGreaterEqual(len(messages), 1)
-        self.assertEqual(messages[0].get("sender"), "David")
-        clientA.close()
-        clientB_new.close()
-
-    def test_delete_message(self):
-        client_frank = self.FakeClient()
-        client_grace = self.FakeClient()
-        client_frank.request_public_key()
-        client_grace.request_public_key()
-        rsp_frank = client_frank.create_user("Frank", "frankpwd")
-        rsp_grace = client_grace.create_user("Grace", "gracepwd")
-        rsp_msg = client_frank.send_message("Grace", "Hi Grace")
-        self.assertEqual(rsp_msg.type, MessageType.MESSAGE_RECEIVED)
-        message_id = rsp_msg.data.get("message_id")
-        self.assertIsNotNone(message_id)
-        rsp_del = client_frank.delete_message(message_id)
-        self.assertEqual(rsp_del.type, MessageType.MESSAGE_DELETED)
-        self.assertNotIn(message_id, server.chat_data.messages)
-        client_frank.close()
-        client_grace.close()
-
-    def test_delete_account(self):
-        client_henry = self.FakeClient()
-        client_irene = self.FakeClient()
-        client_henry.request_public_key()
-        client_irene.request_public_key()
-        rsp_henry = client_henry.create_user("Henry", "henrypwd")
-        rsp_irene = client_irene.create_user("Irene", "irenepwd")
-        rsp_delacc = client_henry.delete_account()
-        self.assertEqual(rsp_delacc.type, MessageType.USER_DELETED)
-        self.assertEqual(rsp_delacc.data.get("username"), "Henry")
-        rsp_broadcast = client_irene.expect_packet(MessageType.USER_DELETED)
-        self.assertEqual(rsp_broadcast.data.get("username"), "Henry")
-        self.assertNotIn("Henry", server.users)
-        client_henry.close()
-        client_irene.close()
-
-    def test_user_added_broadcast(self):
-        client_jack = self.FakeClient()
-        client_jack.request_public_key()
-        rsp_jack = client_jack.create_user("Jack", "jackpwd")
-        self.assertTrue(rsp_jack.data.get("success"))
-        client_kate = self.FakeClient()
-        client_kate.request_public_key()
-        rsp_kate = client_kate.create_user("Kate", "katepwd")
-        self.assertTrue(rsp_kate.data.get("success"))
-        rsp_bcast = client_jack.expect_packet(MessageType.USER_ADDED)
-        self.assertEqual(rsp_bcast.data.get("username"), "Kate")
-        client_jack.close()
-        client_kate.close()
-
-    def test_regression_invalid_encrypted_packet(self):
-        fake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        fake_sock.settimeout(2)
-        fake_sock.connect((utils.SERVER_IP, utils.SERVER_PORT))
-        fake_sock.sendall(b"invalid encrypted content")
-        try:
-            data = fake_sock.recv(1024)
-            self.assertTrue(data == b"" or data is None)
-        except socket.timeout:
-            pass
-        finally:
-            fake_sock.close()
-
-
-# =========================
-# Main entry for unittest
-# =========================
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

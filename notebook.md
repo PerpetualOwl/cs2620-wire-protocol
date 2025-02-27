@@ -181,3 +181,111 @@ Sending packet to ('127.0.0.1', 52907): MessageType.MESSAGE_RECEIVED
 Packet length is: 194
 
 We can see that the custom protocol uses roughly 50 less bytes per package, which is pretty significant if most messages are quite short. Hence, our protocol is more efficient. On the other hand, we can note that our serialization starts with a byte representing packet type, which might not be scalable if more kinds of messages are sent between server and client. Backwards compatibility might be broken if we need another byte to represent packet type.
+
+# Overview
+
+We first thought about what we needed to design, because we figured most of our old code was not compatible with gRPC. We want to implement the following features:
+
+- **Account management:**  
+  - Create accounts  
+  - Login  
+  - Delete accounts
+
+- **Message operations:**  
+  - Send messages  
+  - Receive messages  
+  - Delete messages
+
+- **Real-time messaging:**  
+  Utilizes gRPC streaming for bi-directional communication.
+
+- **User listing:**  
+  Supports wildcard pattern matching for easy searching.
+
+
+We investigated how to start a gRPC service. We followed the following steps (this includes planning ahead for UI).
+
+1. **Install Required Packages:**
+
+   ```bash
+   pip install grpcio grpcio-tools PyQt5
+   ```
+
+2. **Generate gRPC Code:**
+
+   Place `chat.proto` in a `proto` directory, then run:
+
+   ```bash
+   mkdir -p proto
+   cp chat.proto proto/
+   python generate_grpc.py
+   ```
+
+   This will generate the files:
+   - `chat_pb2.py`
+   - `chat_pb2_grpc.py`
+
+3. **File Structure:**
+
+   - `chat.proto`: Protocol Buffer definition for the chat service.
+   - `chat_server.py`: Server implementation.
+   - `chat_client.py`: PyQt5 client implementation.
+   - `generate_grpc.py`: Script to generate gRPC code from the proto file.
+
+### gRPC vs. Custom Wire Protocol/JSON
+
+- **Implementation:**  
+  - Having code gen made it a lot easier, as we had to think less about annoying details
+  - Server implements the service defined in the proto file, less custom logic to figure out how to serialize/deserialize packets.
+  - Reduced work to simply implementing each different request. 
+  - Client connects via gRPC stubs.
+  - Client needs to think a lot less about serialize/deserialize. We also noticed that integration was seemless (it feels like we are making local call). 
+  - Client code feels like it does no distributed computing!
+  - Sockets have some max bytes they can receive, which is abstracted away with gRPC. 
+  - Native support for bi-directional streaming.
+  - Overall, gRPC felt much easier on both the server and client side. 
+
+- **Data Size & Performance:**  
+  - Binary Protocol Buffers are smaller and faster to serialize/deserialize compared to JSON.
+  - Built-in support for streaming.
+
+- **Error Handling:**  
+  - gRPC provides built-in status codes and error handling mechanisms.
+  - We don't need to think about error handling as much
+---
+
+## 2/26/25
+
+### Update 1
+
+- Integrated gRPC by replacing our previous socket-based calls.
+- Separated login and account creation into distinct requests.
+- Added a streaming endpoint for real-time message delivery when users are online.
+- Overall, the gRPC-based request-response structure mirrors the previous design with improvements in performance and reliability.
+
+### Update 2
+
+- Improved the user interface with a new subway surfers–inspired background to aid user focus.
+
+### Update 3
+
+- Fixed several UI bugs:
+  - Resolved issues with login failures.
+  - Modified the getMessage functionality to trigger on user request rather than automatically.
+
+### Update 4
+
+- Added tests in `test.py` covering:
+  - Basic functionality of the chat service.
+  - Message operation tests.
+  - Integration tests including login functionality.
+
+## Answer to questions.
+We answered how client and server implementation changed earlier. Overall gRPC made both much easier. Regarding testing, that was also easier because of the simplification of client and server code. Both followed simpler abstractions that made it easy to test functionality. 
+
+Since some code was rewritten, we can only compare certain requests to old requests with json and the old custom wire protocol. 
+Intuitively, it should be smaller because it codegens custom serialization functions for each call.
+
+For the old MESSAGE_RECEIVED response, we took 138 bytes in our packet. However, for gRPC, we only needed 54 bytes. It is clearly a lot more efficient. 
+
+Github Link: https://github.com/PerpetualOwl/cs2620-wire-protocol

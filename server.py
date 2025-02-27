@@ -1,258 +1,349 @@
-import socket
+import grpc
+import time
+import uuid
+import hashlib
+import re
+from concurrent import futures
 import threading
-import sys, uuid
-from datetime import datetime
-from typing import Any, Optional
-from utils import *
+import logging
 
-# Global server keys.
-SERVER_PUBLIC_KEY: Optional[bytes] = None
-SERVER_PRIVATE_KEY: Optional[bytes] = None
+# Import the generated gRPC code
+import chat_pb2
+import chat_pb2_grpc
 
-# Global chat data store and user registry.
-chat_data = ChatData()
-users: dict[str, str] = {}
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('chat_server')
 
-# Lists and dictionaries to keep track of connections.
-clients = []  # list of all connected sockets
-authed_clients: dict[str, socket.socket] = {}  # username -> client socket
-
-global_lock = threading.Lock()
-
-def send_packet_to_client(client_socket: socket.socket, packet: ServerPacket, is_public_key_response: bool = False) -> None:
-    """Send a packet to a particular client."""
-    try:
-        print(f"Sending packet to {client_socket.getpeername()}: {packet.type}")
-        data: bytes = serialize_packet(packet)
-        client_socket.sendall(data)
-    except Exception as e:
-        print(f"Error sending packet: {e}")
-        print(data)
-
-def broadcast_to_clients(packet: ServerPacket, exclude: Optional[socket.socket] = None) -> None:
-    """Broadcast a packet to all connected clients except one (if specified)."""
-    print(f"Broadcasting packet to all clients: {packet.type}")
-    for client_socket in clients:
-        if client_socket != exclude:
-            send_packet_to_client(client_socket, packet)
-
-def handle_client(client_socket: socket.socket, address):
-    """Handle communication with a connected client."""
-    print(f"New connection from {address[0]}:{address[1]}")
-    
-    try:
-        while True:
-            message = client_socket.recv(65536)
-            if not message:
-                print(f"Connection closed by {address[0]}:{address[1]}")
-                break
-
-            with global_lock:
-                # First check if this is an unencrypted public key request.
-                try:
-                    packet: ClientPacket = deserialize_packet(message, ClientPacket)
-                    if packet.type == MessageType.REQUEST_PUBLIC_KEY:
-                        send_packet_to_client(client_socket, 
-                            ServerPacket(type=MessageType.PUBLIC_KEY_RESPONSE, 
-                                         data={"public_key": SERVER_PUBLIC_KEY.decode("utf-8")}))
-                        continue
-                except Exception:
-                    pass
-
-                # Otherwise, attempt decryption.
-                try:
-                    packet = deserialize_packet(decrypt(SERVER_PRIVATE_KEY, message), ClientPacket)
-                except Exception as e:
-                    print(f"Error decrypting message from {address[0]}:{address[1]}: {e}")
-                    continue
-
-                print(f"Received packet from {address[0]}:{address[1]}: {packet.type}")
-                print("\tData:", packet.data)
-
-                # Handle new user creation or login.
-                if packet.type == MessageType.CREATE_USER_REQUEST:
-                    username = packet.data["username"]
-                    password = packet.data["password"]
-                    print(f"Creating user: {username}")
-                    if username not in users:
-                        print(f"User {username} created")
-                        users[username] = password
-                        chat_data.add_user(username)
-                        authed_clients[username] = client_socket
-                        broadcast_to_clients(ServerPacket(type=MessageType.USER_ADDED, data={"username": username}), 
-                                               exclude=client_socket)
-                        send_packet_to_client(client_socket, 
-                            ServerPacket(type=MessageType.CREATE_USER_RESPONSE, 
-                                         data={"success": True, "message": "New account created!"}))
-                    else:
-                        if password != users[username]:
-                            print(f"Failed login for user {username}: Wrong password")
-                            send_packet_to_client(client_socket, 
-                                ServerPacket(type=MessageType.CREATE_USER_RESPONSE, 
-                                             data={"success": False, "message": "Wrong password!"}))
-                        else:
-                            print(f"User {username} logged in")
-                            authed_clients[username] = client_socket
-                            unread_count = len(chat_data.unread_queue.get(username, []))
-                            send_packet_to_client(client_socket, 
-                                ServerPacket(type=MessageType.CREATE_USER_RESPONSE, 
-                                             data={"success": True, "message": f"Logged in! You have {unread_count} unread messages."}))
-                    continue
-
-                # For all other packet types, extract username and password for auth.
-                username = packet.data.get("sender", packet.data.get("username"))
-                password = packet.data["password"]
-
-                if password != users.get(username, None):
-                    print(f"Unauthorized access from {address[0]}:{address[1]}")
-                    continue
-
-                # Process the remaining packet types using a match-case.
-                match packet.type:
-                    case MessageType.REQUEST_MESSAGES:
-                        print(f"Sending initial messages to {username}")
-                        messages: ChatData = chat_data.get_initial()
-                        send_packet_to_client(client_socket, 
-                            ServerPacket(type=MessageType.INITIAL_CHATDATA, 
-                                         data={"messages": messages.model_dump()}))
-                    
-                    case MessageType.REQUEST_UNREAD_MESSAGES:
-                        # New branch for unread messages.
-                        # Verify that 'num_messages' is a valid number string.
-                        if not str(packet.data.get("num_messages", "")).isdigit():
-                            continue
-                        num_messages = int(packet.data["num_messages"])
-                        print(f"Sending {num_messages} unread message(s) to {username}")
-                        unread_msgs = chat_data.pop_unread_messages(username, num_messages=num_messages)
-                        # Convert each ChatMessage to its dict representation.
-                        unread_msgs_dict = [msg.model_dump() for msg in unread_msgs]
-                        send_packet_to_client(client_socket, 
-                            ServerPacket(type=MessageType.UNREAD_MESSAGES_RESPONSE, 
-                                         data={"messages": unread_msgs_dict}))
-                    
-                    case MessageType.SEND_MESSAGE:
-                        recipient = packet.data["recipient"]
-                        msg_text = packet.data["message"]
-                        print(f"Message from {username} to {recipient}: {msg_text}")
-                        if recipient not in users:
-                            print(f"Recipient {recipient} not found")
-                            continue
-                        if recipient == username:
-                            print(f"Sender and recipient are the same ({username}), ignoring.")
-                            continue
-                        message_obj = ChatMessage(
-                            sender=username, 
-                            recipient=recipient, 
-                            message=msg_text, 
-                            message_id=str(uuid.uuid4()), 
-                            timestamp=datetime.now()
-                        )
-                        if chat_data.add_message(message_obj):
-                            print("Message logged successfully")
-                            # Send a confirmation to the sender.
-                            send_packet_to_client(client_socket, 
-                                ServerPacket(type=MessageType.MESSAGE_RECEIVED, 
-                                             data=message_obj.model_dump()))
-                            recipient_active = False
-                            # If recipient is online, send the message immediately.
-                            for user, rec_socket in authed_clients.items():
-                                if user == recipient:
-                                    recipient_active = True
-                                    print(f"Delivering message to active user {recipient}")
-                                    send_packet_to_client(rec_socket, 
-                                        ServerPacket(type=MessageType.MESSAGE_RECEIVED, 
-                                                     data=message_obj.model_dump()))
-                            if not recipient_active:
-                                # Otherwise, add the message ID to the recipient's unread queue.
-                                chat_data.add_unread_message(recipient, message_obj.message_id)
-                        else:
-                            print("Failed to add message to logs")
-                    
-                    case MessageType.DELETE_MESSAGE:
-                        print(f"Deleting message for {username}")
-                        message_id = packet.data["message_id"]
-                        msg_obj = chat_data.get_message(message_id)
-                        if chat_data.delete_message(username, message_id, backend=True):
-                            print("Message deleted successfully")
-                            send_packet_to_client(client_socket, 
-                                ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
-                            for user, client_sock in authed_clients.items():
-                                if user == username or (msg_obj and user == msg_obj.recipient):
-                                    send_packet_to_client(client_sock, 
-                                        ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": message_id}))
-                        else:
-                            print("Failed to delete the message")
-                    case MessageType.DELETE_MESSAGES:
-                        message_ids = packet.data["message_ids"]
-                        for mid in message_ids:
-                            msg_obj = chat_data.get_message(mid)
-                            # Look up the message if needed (optionally logging any that do not exist)
-                            if chat_data.delete_message(username, mid, backend=True):
-                                print(f"Deleted message {mid} for {username}")
-                                # Optionally broadcast the deletion update to both sender and recipient:
-                                for user, client_sock in authed_clients.items():
-                                    if user == username or (msg_obj and user == msg_obj.recipient):
-                                        send_packet_to_client(client_sock, 
-                                            ServerPacket(type=MessageType.MESSAGE_DELETED, data={"message_id": mid}))
-                            else:
-                                print(f"Failed to delete message {mid}")
-                    
-                    case MessageType.DELETE_ACCOUNT:
-                        print(f"Deleting account {username}")
-                        if username in users:
-                            del users[username]
-                            chat_data.delete_user(username)
-                            print(f"Account {username} deleted")
-                            broadcast_to_clients(ServerPacket(type=MessageType.USER_DELETED, data={"username": username}),
-                                                   exclude=client_socket)
-                            send_packet_to_client(client_socket, 
-                                ServerPacket(type=MessageType.USER_DELETED, data={"username": username}))
-                            break
-                        else:
-                            print(f"User {username} not found")
-                    
-                    case _:
-                        pass
+class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
+    def __init__(self):
+        # In-memory storage (would use a database in production)
+        self.accounts = {}  # username -> {password_hash, online_status}
+        self.messages = {}  # username -> [Message]
+        self.online_users = {}  # username -> list of message queues for streaming
+        self.sessions = {}  # session_token -> username
+        self.session_lock = threading.Lock()
+        
+    def validate_session(self, session_token, username=None):
+        """Validate session token and optionally check if it belongs to the provided username"""
+        with self.session_lock:
+            if session_token not in self.sessions:
+                return False
+            if username and self.sessions[session_token] != username:
+                return False
+            return True
             
-    except ConnectionResetError:
-        print(f"Connection lost with {address[0]}:{address[1]}")
-    except Exception as e:
-        print(f"An error occurred with {address[0]}:{address[1]}: {e}")
-    finally:
-        client_socket.close()
-        # Remove the client from authed_clients if present.
-        for user, sock in list(authed_clients.items()):
-            if sock == client_socket:
-                del authed_clients[user]
-                break
-        if client_socket in clients:
-            clients.remove(client_socket)
-        print(f"Closed connection with {address[0]}:{address[1]}")
+    def _generate_session_token(self, username):
+        """Generate a unique session token for a user"""
+        token = str(uuid.uuid4())
+        with self.session_lock:
+            self.sessions[token] = username
+        return token
+        
+    def _invalidate_session(self, session_token):
+        """Invalidate a session token"""
+        with self.session_lock:
+            if session_token in self.sessions:
+                del self.sessions[session_token]
+                
+    def _match_pattern(self, username, pattern):
+        """Match username against a wildcard pattern"""
+        if not pattern:
+            return True
+        # Convert wildcard pattern to regex
+        regex_pattern = pattern.replace("*", ".*").replace("?", ".")
+        return re.match(f"^{regex_pattern}$", username) is not None
+        
+    def CreateAccount(self, request, context):
+        username = request.username
+        password_hash = request.password_hash
+        
+        # Check if account exists
+        if username in self.accounts:
+            return chat_pb2.CreateAccountResponse(
+                success=False,
+                message="Account already exists. Please login.",
+                account_exists=True
+            )
+            
+        # Create new account
+        self.accounts[username] = {"password_hash": password_hash}
+        self.messages[username] = []
+        logger.info(f"Created new account for user: {username}")
+        
+        return chat_pb2.CreateAccountResponse(
+            success=True,
+            message="Account created successfully",
+            account_exists=False
+        )
+        
+    def Login(self, request, context):
+        username = request.username
+        password_hash = request.password_hash
+        
+        # Check if account exists
+        if username not in self.accounts:
+            return chat_pb2.LoginResponse(
+                success=False,
+                message="Invalid username",
+                unread_message_count=0
+            )
+            
+        # Verify password
+        if self.accounts[username]["password_hash"] != password_hash:
+            return chat_pb2.LoginResponse(
+                success=False,
+                message="Invalid password",
+                unread_message_count=0
+            )
+            
+        # Generate session token
+        session_token = self._generate_session_token(username)
+        
+        # Mark user as online
+        self.accounts[username]["online"] = True
+        self.online_users[username] = []
+        
+        # Count unread messages
+        unread_count = sum(1 for msg in self.messages[username] if not msg.read)
+        logger.info(f"User {username} logged in. Unread messages: {unread_count}")
+        
+        return chat_pb2.LoginResponse(
+            success=True,
+            message="Login successful",
+            unread_message_count=unread_count,
+            session_token=session_token
+        )
+        
+    def ListAccounts(self, request, context):
+        if not self.validate_session(request.session_token):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
+            
+        pattern = request.pattern
+        page = max(1, request.page)
+        page_size = max(10, min(100, request.page_size))  # Between 10 and 100
+        
+        # Filter accounts based on pattern
+        filtered_accounts = [
+            username for username in self.accounts.keys()
+            if self._match_pattern(username, pattern)
+        ]
+        
+        # Calculate pagination
+        total_accounts = len(filtered_accounts)
+        total_pages = (total_accounts + page_size - 1) // page_size
+        
+        # Get accounts for current page
+        start_idx = (page - 1) * page_size
+        end_idx = min(start_idx + page_size, total_accounts)
+        
+        page_accounts = filtered_accounts[start_idx:end_idx]
+        
+        return chat_pb2.ListAccountsResponse(
+            usernames=page_accounts,
+            total_accounts=total_accounts,
+            current_page=page,
+            total_pages=total_pages
+        )
+        
+    def DeleteAccount(self, request, context):
+        username = request.username
+        password_hash = request.password_hash
+        
+        # Validate session
+        if not self.validate_session(request.session_token, username):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
+            
+        # Check if account exists
+        if username not in self.accounts:
+            return chat_pb2.DeleteAccountResponse(
+                success=False,
+                message="Account not found"
+            )
+            
+        # Verify password
+        if self.accounts[username]["password_hash"] != password_hash:
+            return chat_pb2.DeleteAccountResponse(
+                success=False,
+                message="Invalid password"
+            )
+            
+        # Delete account and associated messages
+        del self.accounts[username]
+        del self.messages[username]
+        
+        # Remove from online users if logged in
+        if username in self.online_users:
+            del self.online_users[username]
+            
+        # Delete messages sent to other users
+        for recipient, msgs in self.messages.items():
+            self.messages[recipient] = [
+                msg for msg in msgs if msg.sender != username
+            ]
+            
+        logger.info(f"Account deleted: {username}")
+        
+        return chat_pb2.DeleteAccountResponse(
+            success=True,
+            message="Account deleted successfully"
+        )
+        
+    def SendMessage(self, request, context):
+        sender = request.sender
+        recipient = request.recipient
+        content = request.content
+        
+        # Validate session
+        if not self.validate_session(request.session_token, sender):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
+            
+        # Check if sender and recipient exist
+        if sender not in self.accounts:
+            return chat_pb2.SendMessageResponse(
+                success=False,
+                message="Sender account not found"
+            )
+            
+        if recipient not in self.accounts:
+            return chat_pb2.SendMessageResponse(
+                success=False,
+                message="Recipient account not found"
+            )
+            
+        # Create message
+        message_id = str(uuid.uuid4())
+        message = chat_pb2.Message(
+            message_id=message_id,
+            sender=sender,
+            recipient=recipient,
+            content=content,
+            timestamp=int(time.time()),
+            read=False
+        )
+        
+        # If recipient is online, deliver immediately
+        if recipient in self.online_users and self.online_users[recipient]:
+            for queue in self.online_users[recipient]:
+                queue.append(message)
+            logger.info(f"Message from {sender} to {recipient} delivered immediately")
+        else:
+            # Store message for later delivery
+            self.messages[recipient].append(message)
+            logger.info(f"Message from {sender} to {recipient} queued for later delivery")
+        
+        
+        response =  chat_pb2.SendMessageResponse(
+            success=True,
+            message="Message sent",
+            message_id=message_id
+        )
+        print(len(response.SerializeToString()))
+        return response
+        
+    def GetMessages(self, request, context):
+        username = request.username
+        limit = request.limit if request.limit > 0 else 10
+        
+        # Validate session
+        if not self.validate_session(request.session_token, username):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
+            
+        # Check if account exists
+        if username not in self.accounts:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Account not found")
+            
+        # Get messages
+        user_messages = self.messages[username][:limit]
+        remaining = len(self.messages[username]) - limit
+        
+        # Mark retrieved messages as read
+        for msg in user_messages:
+            msg.read = True
+            
+        # Update messages list (remove retrieved messages)
+        self.messages[username] = self.messages[username][limit:]
+        
+        logger.info(f"Retrieved {len(user_messages)} messages for {username}. {remaining} remaining.")
+        
+        return chat_pb2.GetMessagesResponse(
+            messages=user_messages,
+            remaining_messages=remaining
+        )
+        
+    def DeleteMessages(self, request, context):
+        username = request.username
+        message_ids = set(request.message_ids)
+        
+        # Validate session
+        if not self.validate_session(request.session_token, username):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
+            
+        # Check if account exists
+        if username not in self.accounts:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Account not found")
+            
+        # Delete messages
+        original_count = len(self.messages[username])
+        self.messages[username] = [
+            msg for msg in self.messages[username]
+            if msg.message_id not in message_ids
+        ]
+        deleted_count = original_count - len(self.messages[username])
+        
+        logger.info(f"Deleted {deleted_count} messages for user {username}")
+        
+        return chat_pb2.DeleteMessagesResponse(
+            success=True,
+            message=f"Deleted {deleted_count} messages",
+            deleted_count=deleted_count
+        )
+        
+    def ReceiveMessages(self, request, context):
+        username = request.username
+        
+        # Validate session
+        if not self.validate_session(request.session_token, username):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
+            
+        # Check if account exists
+        if username not in self.accounts:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Account not found")
+            
+        # Create message queue for this stream
+        message_queue = []
+        
+        # Register this queue for real-time message delivery
+        if username not in self.online_users:
+            self.online_users[username] = []
+        self.online_users[username].append(message_queue)
+        
+        try:
+            while context.is_active():
+                # Check for new messages
+                if message_queue:
+                    yield message_queue.pop(0)
+                else:
+                    time.sleep(0.5)  # Wait a bit before checking again
+        finally:
+            # Clean up when the stream ends
+            if username in self.online_users and message_queue in self.online_users[username]:
+                self.online_users[username].remove(message_queue)
+                if not self.online_users[username]:
+                    del self.online_users[username]
+                    self.accounts[username]["online"] = False
 
-def main():
-    global SERVER_PUBLIC_KEY, SERVER_PRIVATE_KEY
-    SERVER_PRIVATE_KEY, SERVER_PUBLIC_KEY = generate_key_pair()
-    server_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
+def serve():
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    chat_pb2_grpc.add_ChatServiceServicer_to_server(ChatServicer(), server)
+    server.add_insecure_port('[::]:50051')
+    server.start()
+    logger.info("Server started on port 50051")
     try:
-        server_socket.bind((SERVER_IP, SERVER_PORT))
-        server_socket.listen(5)
-        print(f"Server listening on {SERVER_IP}:{SERVER_PORT}")
-
-        while True:
-            client_socket, address = server_socket.accept()
-            clients.append(client_socket)
-            client_thread = threading.Thread(target=handle_client, args=(client_socket, address))
-            client_thread.daemon = True
-            client_thread.start()
+        server.wait_for_termination()
     except KeyboardInterrupt:
-        print("\nServer shutting down.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-    finally:
-        for c in clients:
-            c.close()
-        server_socket.close()
+        logger.info("Server shutting down")
+        server.stop(0)
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    serve()

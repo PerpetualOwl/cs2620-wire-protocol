@@ -1,420 +1,697 @@
-import socket
-import threading
 import sys
-from typing import Any, Optional, Union, Callable
-from utils import *
+import grpc
+import hashlib
+import threading
 import time
-import json
 import uuid
-import subprocess
-from threading import Thread
+import re
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                            QLabel, QLineEdit, QPushButton, QTextEdit, QListWidget, QListWidgetItem,
+                            QStackedWidget, QMessageBox, QInputDialog, QDialog, 
+                            QFormLayout, QSpinBox, QDialogButtonBox, QTabWidget, QAbstractItemView)
+from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot, Qt
+from PyQt5.QtGui import QPixmap, QPalette, QBrush
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QTextBrowser, QLineEdit, QPushButton,
-                             QInputDialog, QMessageBox, QLabel, QComboBox, 
-                             QListWidget, QAbstractItemView, QListWidgetItem,
-                             QCompleter)
+# Import the generated gRPC code
+import chat_pb2
+import chat_pb2_grpc
 
-SERVER_PUBLIC_KEY: Optional[bytes] = None
+def hash_password(password):
+    """Hash a password using SHA-256"""
+    return hashlib.sha256(password.encode()).hexdigest()
 
-chat_data = ChatData()
-username = None
-password = None
-logged_in = False
-login_failed = False
+class MessageReceiver(QThread):
+    """Thread for receiving messages from the server"""
+    message_received = pyqtSignal(object)
+    
+    def __init__(self, stub, username, session_token):
+        super().__init__()
+        self.stub = stub
+        self.username = username
+        self.session_token = session_token
+        self.running = True
+        
+    def run(self):
+        try:
+            request = chat_pb2.ReceiveMessagesRequest(
+                username=self.username,
+                session_token=self.session_token
+            )
+            
+            for message in self.stub.ReceiveMessages(request):
+                if not self.running:
+                    break
+                self.message_received.emit(message)
+        except grpc.RpcError as e:
+            print(f"gRPC Error in message receiver: {e}")
+        except Exception as e:
+            print(f"Error in message receiver: {e}")
+            
+    def stop(self):
+        self.running = False
 
-chat_window = None
+class LoginDialog(QDialog):
+    """Dialog for login or account creation"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Login")
+        self.setMinimumWidth(300)
+        
+        # Create layout
+        layout = QVBoxLayout()
+        
+        # Login form
+        form_layout = QFormLayout()
+        self.username_input = QLineEdit()
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        
+        form_layout.addRow("Username:", self.username_input)
+        form_layout.addRow("Password:", self.password_input)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.login_button = QPushButton("Login")
+        self.create_button = QPushButton("Create Account")
+        
+        button_layout.addWidget(self.login_button)
+        button_layout.addWidget(self.create_button)
+        
+        layout.addLayout(form_layout)
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+        
+        # Connect signals
+        self.login_button.clicked.connect(self.accept)
+        self.create_button.clicked.connect(self.on_create_account)
+        
+        self.create_mode = False
+        
+    def on_create_account(self):
+        self.create_mode = True
+        self.accept()
+        
+    def get_credentials(self):
+        return (
+            self.username_input.text(),
+            hash_password(self.password_input.text()),
+            self.create_mode
+        )
 
-def print_thread(text: str) -> None:
-    print("\033[F", end="", flush=True)  # Move cursor up one line
-    print("\033[K", end="", flush=True)  # Clear the current line
-    print(text, flush=True)
-    print("\033[E", end="", flush=True)  # Move cursor to the beginning of the next line
+class MessageListItem(QListWidgetItem):
+    """Custom list item to store message ID and display message info"""
+    def __init__(self, message):
+        display_text = f"From: {message.sender} - {time.ctime(message.timestamp)}\n{message.content[:50]}{'...' if len(message.content) > 50 else ''}"
+        super().__init__(display_text)
+        self.message_id = message.message_id
+        self.setToolTip(message.content)
 
-def process_server_message_gui(data: bytes) -> None:
-    """
-    Process server messages for the GUI.
-    Now also handles the UNREAD_MESSAGES_RESPONSE which contains unread messages.
-    """
-    global chat_window, chat_data, SERVER_PUBLIC_KEY
-    try:
-        packet: ServerPacket = deserialize_packet(data, ServerPacket)
-        if packet.type == MessageType.PUBLIC_KEY_RESPONSE:
-            SERVER_PUBLIC_KEY = packet.data["public_key"].encode("utf-8")
-            print("Received server public key.")
-        elif packet.type == MessageType.CREATE_USER_RESPONSE:
-            # Forward the login response to the chat window:
-            if chat_window:
-                chat_window.handle_login_response(packet.data)
-        elif packet.type == MessageType.MESSAGE_RECEIVED:
-            message_data = packet.data
-            try:
-                new_msg = ChatMessage(**message_data)
-                chat_data.add_message(new_msg)
-            except Exception as e:
-                print("Error adding message:", e)
-        elif packet.type == MessageType.UNREAD_MESSAGES_RESPONSE:
-            # New branch: Process a list of unread messages sent by the server.
-            messages_list = packet.data.get("messages", [])
-            if not isinstance(messages_list, list):
-                print("Unexpected unread messages format.")
-            else:
-                for msg_data in messages_list:
-                    try:
-                        new_msg = ChatMessage(**msg_data)
-                        chat_data.add_message(new_msg)
-                    except Exception as e:
-                        print("Error adding unread message:", e)
-                print(f"Added {len(messages_list)} unread message(s).")
-        elif packet.type == MessageType.MESSAGE_DELETED:
-            message_id = packet.data["message_id"]
-            # Delete message (adjusting the call since our ChatData.delete_message requires sender info only for backend)
-            chat_data.delete_message("", message_id)
-        elif packet.type == MessageType.USER_ADDED:
-            uname = packet.data["username"]
-            chat_data.add_user(uname)
-        elif packet.type == MessageType.USER_DELETED:
-            uname = packet.data["username"]
-            chat_data.delete_user(uname)
-        elif packet.type == MessageType.INITIAL_CHATDATA:
-            messages = packet.data["messages"]
-            chat_data = ChatData(**messages)
-        # (Other packet types can be handled as needed.)
-    except Exception as e:
-        print("Error processing server message (GUI):", e)
-
-def send_packet_to_server(packet: ClientPacket) -> None:
-    """Sends a packet to the server."""
-    global SERVER_PUBLIC_KEY, client_socket
-    try:
-        if SERVER_PUBLIC_KEY is not None:
-            data: bytes = encrypt(SERVER_PUBLIC_KEY, serialize_packet(packet))
-        elif packet.type == MessageType.REQUEST_PUBLIC_KEY:
-            data: bytes = serialize_packet(packet)
-        else:
-            print_thread("Server public key not available. Cannot send packet.")
-            return
-        client_socket.sendall(data)
-    except Exception as e:
-        print_thread(f"Error sending packet: {e}")
-        sys.exit(1)
-
-def on_startup() -> None:
-    """Function that runs on client startup."""
-    try:
-        send_packet_to_server(ServerPacket(type=MessageType.REQUEST_PUBLIC_KEY))
-    except Exception as e:
-        print(f"Error on startup: {e}")
-        sys.exit(1)
-
-# Define our main chat window.
-class ChatWindow(QMainWindow):
+class ChatClient(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("gRPC Chat Client")
+        self.resize(800, 600)
+        
+        # Set subway surfers background
+        self.set_background()
+        
+        # gRPC connection
+        self.channel = None
+        self.stub = None
+        self.session_token = None
         self.username = None
-        self.password = None  # this will be the hashed password
-        self.logged_in = False
-
-        self.setWindowTitle("Chat Client")
-        self.resize(600, 500)
-
-        # Main central widget and layout.
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-
-        # Chat display section.
-        self.chat_display = QTextBrowser(self)
-        self.chat_display.setReadOnly(True)
-        main_layout.addWidget(QLabel("Chat Messages:"))
-        main_layout.addWidget(self.chat_display)
-
-        # Available Users section.
-        self.available_users = []
-        users_layout = QHBoxLayout()
-        self.users_label = QLabel("Available Users:")
-        users_layout.addWidget(self.users_label)
-        self.users_combobox = QComboBox(self)
-        self.users_combobox.setEditable(True)                                    # <-- allow typing
-        # Create and set the completer with case-insensitive substring matching:
-        self.userCompleter = QCompleter([], self)
-        self.userCompleter.setCaseSensitivity(Qt.CaseInsensitive)
-        self.userCompleter.setFilterMode(Qt.MatchContains)
-        self.users_combobox.setCompleter(self.userCompleter)
-        users_layout.addWidget(self.users_combobox)
-        main_layout.addLayout(users_layout)
-        self.users_combobox.activated[str].connect(self.on_user_selected)
-
-
-        # Layout for sending messages.
-        send_layout = QHBoxLayout()
-        self.recipient_edit = QLineEdit(self)
-        self.recipient_edit.setPlaceholderText("Recipient username")
-        send_layout.addWidget(self.recipient_edit)
-        self.message_edit = QLineEdit(self)
-        self.message_edit.setPlaceholderText("Type your message here...")
-        send_layout.addWidget(self.message_edit)
-        self.send_button = QPushButton("Send", self)
-        send_layout.addWidget(self.send_button)
-        main_layout.addLayout(send_layout)
-        self.send_button.clicked.connect(self.on_send_message)
-        self.message_edit.returnPressed.connect(self.on_send_message)
-
-        # Layout for message deletion controls.
-        deletion_layout = QHBoxLayout()
-        deletion_layout.addWidget(QLabel("Your Messages:"))
-
-        # Instead of a dropdown, create a list widget that allows multi-selection:
-        self.message_list = QListWidget(self)
-        self.message_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        deletion_layout.addWidget(self.message_list)
-
-        self.delete_message_button = QPushButton("Delete Selected Message", self)
-        deletion_layout.addWidget(self.delete_message_button)
-        main_layout.addLayout(deletion_layout)
-        self.delete_message_button.clicked.connect(self.on_delete_message)
-
-        # Layout for account deletion.
-        account_deletion_layout = QHBoxLayout()
-        self.delete_account_button = QPushButton("Delete Account", self)
-        account_deletion_layout.addWidget(self.delete_account_button)
-        main_layout.addLayout(account_deletion_layout)
-        self.delete_account_button.clicked.connect(self.on_delete_account)
-
-        # ***** New: Layout for requesting unread messages *****
-        unread_layout = QHBoxLayout()
-        unread_layout.addWidget(QLabel("Unread Count:"))
-        self.unread_count_edit = QLineEdit(self)
-        self.unread_count_edit.setPlaceholderText("Enter number")
-        unread_layout.addWidget(self.unread_count_edit)
-        self.request_unread_button = QPushButton("Request Unread Messages", self)
-        unread_layout.addWidget(self.request_unread_button)
-        main_layout.addLayout(unread_layout)
-        self.request_unread_button.clicked.connect(self.on_request_unread_messages)
-        # *********************************************************
-
-        # Timer to periodically update the chat display, available users, and message dropdown.
-        self.update_timer = QTimer(self)
-        self.update_timer.timeout.connect(self.update_chat_display)
-        self.update_timer.start(500)  # update every 500ms
-
-        # Prompt for login/registration shortly after startup.
-        QTimer.singleShot(100, self.login)
-
-    def login(self):
-        """Prompt for username and password then send login/create packet."""
-        username, ok = QInputDialog.getText(self, "Login / Register", "Username:")
-        if not ok or not username.strip():
-            self.close()
-            return
-        self.username = username.strip()
-
-        password, ok = QInputDialog.getText(self, "Login / Register", "Password:", QLineEdit.Password)
-        if not ok or not password:
-            self.close()
-            return
-        # Immediately hash the password.
-        self.password = hash_password(password)
-        # Build and send the login/create packet.
-        packet = ClientPacket(
-            type=MessageType.CREATE_USER_REQUEST,
-            data={"username": self.username, "password": self.password}
-        )
-        send_packet_to_server(packet)
-        self.statusBar().showMessage("Login/Registration attempt sent. Waiting for server response...")
-
-    @pyqtSlot()
-    def on_send_message(self):
-        """Send a message packet when the user hits the Send button or presses Enter."""
-        if not self.logged_in:
-            QMessageBox.warning(self, "Not logged in", "Please log in first.")
-            return
-
-        recipient = self.recipient_edit.text().strip()
-        if not recipient:
-            QMessageBox.warning(self, "Missing recipient", "Please enter or select a recipient.")
-            return
-
-        text = self.message_edit.text().strip()
-        if not text:
-            return
-
-        packet = ClientPacket(
-            type=MessageType.SEND_MESSAGE,
-            data={"sender": self.username, "recipient": recipient, "message": text, "password": self.password}
-        )
-        send_packet_to_server(packet)
-        self.message_edit.clear()
+        self.message_receiver = None
+        
+        # Setup UI
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        
+        main_layout = QVBoxLayout(self.central_widget)
+        
+        # Create stacked widget for different screens
+        self.stacked_widget = QStackedWidget()
+        
+        # Create login screen
+        self.login_widget = QWidget()
+        login_layout = QVBoxLayout(self.login_widget)
+        
+        server_layout = QHBoxLayout()
+        server_layout.addWidget(QLabel("Server:"))
+        self.server_input = QLineEdit("localhost:50051")
+        server_layout.addWidget(self.server_input)
+        self.connect_button = QPushButton("Connect")
+        server_layout.addWidget(self.connect_button)
+        
+        login_layout.addLayout(server_layout)
+        login_layout.addStretch()
+        
+        # Create main chat screen
+        self.chat_widget = QWidget()
+        chat_layout = QVBoxLayout(self.chat_widget)
+        
+        # User info
+        user_info_layout = QHBoxLayout()
+        self.user_label = QLabel("Not logged in")
+        self.logout_button = QPushButton("Logout")
+        user_info_layout.addWidget(self.user_label)
+        user_info_layout.addStretch()
+        user_info_layout.addWidget(self.logout_button)
+        
+        # Tab widget for chat features
+        self.tabs = QTabWidget()
+        
+        # Messages tab
+        self.messages_tab = QWidget()
+        messages_layout = QVBoxLayout(self.messages_tab)
+        
+        # Message display section
+        display_layout = QHBoxLayout()
+        
+        # Message list for selection
+        self.message_list = QListWidget()
+        self.message_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        
+        # Message details
+        self.message_display = QTextEdit()
+        self.message_display.setReadOnly(True)
+        
+        display_layout.addWidget(self.message_list, 1)
+        display_layout.addWidget(self.message_display, 2)
+        messages_layout.addLayout(display_layout)
+        
+        # Message actions
+        message_actions_layout = QHBoxLayout()
+        self.refresh_button = QPushButton("Get Messages")
+        self.message_count_input = QSpinBox()
+        self.message_count_input.setMinimum(1)
+        self.message_count_input.setMaximum(50)
+        self.message_count_input.setValue(10)
+        self.delete_selected_button = QPushButton("Delete Selected")
+        self.delete_messages_button = QPushButton("Delete All")
+        
+        message_actions_layout.addWidget(self.refresh_button)
+        message_actions_layout.addWidget(QLabel("Count:"))
+        message_actions_layout.addWidget(self.message_count_input)
+        message_actions_layout.addStretch()
+        message_actions_layout.addWidget(self.delete_selected_button)
+        message_actions_layout.addWidget(self.delete_messages_button)
+        
+        messages_layout.addLayout(message_actions_layout)
+        
+        # Send message tab
+        self.send_tab = QWidget()
+        send_layout = QVBoxLayout(self.send_tab)
+        
+        recipient_layout = QHBoxLayout()
+        recipient_layout.addWidget(QLabel("To:"))
+        self.recipient_input = QLineEdit()
+        recipient_layout.addWidget(self.recipient_input)
+        self.list_users_button = QPushButton("List Users")
+        recipient_layout.addWidget(self.list_users_button)
+        
+        self.message_input = QTextEdit()
+        self.message_input.setPlaceholderText("Type your message here...")
+        
+        send_button_layout = QHBoxLayout()
+        send_button_layout.addStretch()
+        self.send_button = QPushButton("Send")
+        send_button_layout.addWidget(self.send_button)
+        
+        send_layout.addLayout(recipient_layout)
+        send_layout.addWidget(self.message_input)
+        send_layout.addLayout(send_button_layout)
+        
+        # User list tab
+        self.users_tab = QWidget()
+        users_layout = QVBoxLayout(self.users_tab)
+        
+        users_search_layout = QHBoxLayout()
+        users_search_layout.addWidget(QLabel("Search:"))
+        self.user_search_input = QLineEdit()
+        users_search_layout.addWidget(self.user_search_input)
+        self.search_button = QPushButton("Search")
+        users_search_layout.addWidget(self.search_button)
+        
+        self.users_list = QListWidget()
+        
+        users_list_actions = QHBoxLayout()
+        self.prev_page_button = QPushButton("Previous")
+        self.page_label = QLabel("Page 1 of 1")
+        self.next_page_button = QPushButton("Next")
+        users_list_actions.addWidget(self.prev_page_button)
+        users_list_actions.addWidget(self.page_label)
+        users_list_actions.addWidget(self.next_page_button)
+        
+        users_layout.addLayout(users_search_layout)
+        users_layout.addWidget(self.users_list)
+        users_layout.addLayout(users_list_actions)
+        
+        # Account tab
+        self.account_tab = QWidget()
+        account_layout = QVBoxLayout(self.account_tab)
+        
+        self.delete_account_button = QPushButton("Delete Account")
+        account_layout.addWidget(self.delete_account_button)
+        account_layout.addStretch()
+        
+        # Add tabs
+        self.tabs.addTab(self.messages_tab, "Messages")
+        self.tabs.addTab(self.send_tab, "Send Message")
+        self.tabs.addTab(self.users_tab, "User List")
+        self.tabs.addTab(self.account_tab, "Account")
+        
+        # Add to main chat layout
+        chat_layout.addLayout(user_info_layout)
+        chat_layout.addWidget(self.tabs)
+        
+        # Add screens to stacked widget
+        self.stacked_widget.addWidget(self.login_widget)
+        self.stacked_widget.addWidget(self.chat_widget)
+        
+        main_layout.addWidget(self.stacked_widget)
+        
+        # Start with login screen
+        self.stacked_widget.setCurrentWidget(self.login_widget)
+        
+        # Connect signals
+        self.connect_button.clicked.connect(self.connect_to_server)
+        self.logout_button.clicked.connect(self.logout)
+        self.refresh_button.clicked.connect(self.get_messages)
+        self.delete_selected_button.clicked.connect(self.delete_selected_messages)
+        self.delete_messages_button.clicked.connect(self.delete_all_messages)
+        self.send_button.clicked.connect(self.send_message)
+        self.list_users_button.clicked.connect(self.show_users_tab)
+        self.search_button.clicked.connect(self.search_users)
+        self.prev_page_button.clicked.connect(self.previous_page)
+        self.next_page_button.clicked.connect(self.next_page)
+        self.delete_account_button.clicked.connect(self.delete_account)
+        self.users_list.itemDoubleClicked.connect(self.select_user)
+        self.message_list.itemClicked.connect(self.display_message_content)
+        
+        # State variables
+        self.current_page = 1
+        self.total_pages = 1
+        self.user_messages = []
+        self.messages_data = {}  # To store full message data
     
-    @pyqtSlot()
-    def on_delete_message(self):
-        if not self.logged_in:
-            QMessageBox.warning(self, "Not logged in", "Please log in first.")
-            return
-        selected_items = self.message_list.selectedItems()
-        if not selected_items:
-            QMessageBox.information(self, "No Selection", "No messages selected for deletion.")
-            return
-        # Gather message IDs from the selected items.
-        message_ids = [item.data(Qt.UserRole) for item in self.message_list.selectedItems()]
-        packet = ClientPacket(
-            type=MessageType.DELETE_MESSAGES,
-            data={"username": self.username, "message_ids": message_ids, "password": self.password}
-        )
-        send_packet_to_server(packet)
-
-    @pyqtSlot()
-    def on_delete_account(self):
-        """Ask for confirmation then send a DELETE_ACCOUNT packet."""
-        reply = QMessageBox.question(
-            self,
-            "Delete Account",
-            "Are you sure you want to delete your account? This action cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            packet = ClientPacket(
-                type=MessageType.DELETE_ACCOUNT,
-                data={"username": self.username, "password": self.password}
-            )
-            send_packet_to_server(packet)
-            QMessageBox.information(self, "Account Deleted",
-                                    "Your account has been deleted. The application will now close.")
-            self.close()
-
-    @pyqtSlot()
-    def on_request_unread_messages(self):
-        """Send a packet to request unread messages from the server."""
-        if not self.logged_in:
-            QMessageBox.warning(self, "Not logged in", "Please log in first.")
-            return
-        count_text = self.unread_count_edit.text().strip()
-        if not count_text.isdigit():
-            QMessageBox.warning(self, "Invalid Input", "Please enter a valid number for unread message count.")
-            return
-        packet = ClientPacket(
-            type=MessageType.REQUEST_UNREAD_MESSAGES,
-            data={"username": self.username, "num_messages": count_text, "password": self.password}
-        )
-        send_packet_to_server(packet)
-        self.unread_count_edit.clear()
-        self.statusBar().showMessage(f"Requested {count_text} unread messages...", 3000)
-
-    def update_chat_display(self):
-        """
-        Refresh the chat display, update the available users list,
-        and update the dropdown listing of your own messages.
-        """
-        selected_message_ids = set(
-            item.data(Qt.UserRole) for item in self.message_list.selectedItems()
-        )
-
-        self.chat_display.clear()
-        self.message_list.clear()
-        user_messages = []
-
+    def set_background(self):
+        """Set a subway surfers background for the application"""
         try:
-            messages_list = list(chat_data.messages.values())
-            messages_list.sort(key=lambda m: m.timestamp)
-            for msg in messages_list:
-                tstamp = msg.timestamp.strftime("%H:%M:%S") if not isinstance(msg.timestamp, str) else msg.timestamp
-                html_line = f'<span title="Message ID: {msg.message_id}">[{tstamp}] {msg.sender} → {msg.recipient}: {msg.message}</span>'
-                self.chat_display.append(html_line)
-                if msg.sender == self.username:
-                    user_messages.append(msg)
-        except Exception as e:
-            print(f"Error updating chat display: {e}")
-
-        for msg in user_messages:
-            tstamp = msg.timestamp.strftime("%H:%M:%S") if not isinstance(msg.timestamp, str) else msg.timestamp
-            preview = msg.message if len(msg.message) <= 20 else msg.message[:20] + "..."
-            display_text = f"[{tstamp}] {preview}"
-            item = QListWidgetItem(display_text)
-            item.setData(Qt.UserRole, msg.message_id)
-            self.message_list.addItem(item)
-
-            if msg.message_id in selected_message_ids:
-                item.setSelected(True)
-
-        if self.username:
-            available_users = sorted(user for user in chat_data.users if user != self.username)
-        else:
-            available_users = sorted(list(chat_data.users))
-
-        if available_users != self.available_users:
-            self.available_users = available_users
-            self.users_combobox.clear()
+            # You would need to have a subway surfers background image file
+            # This is a placeholder - replace with actual file path
+            background_image = QPixmap("subway_surfers_bg.jpg")
             
-            self.users_combobox.addItems(self.available_users)
-            self.userCompleter.model().setStringList(self.available_users)
-
-    @pyqtSlot(str)
-    def on_user_selected(self, selected_user: str):
-        """When a user is selected, copy that name into the recipient field."""
-        self.recipient_edit.setText(selected_user)
-
-    @pyqtSlot(dict)
-    def handle_login_response(self, response):
-        """
-        This slot is intended to be called when a CREATE_USER_RESPONSE is received.
-        The 'response' dictionary should include "success" and "message".
-        """
-        if response.get("success"):
-            if response.get("success"):
-                self.logged_in = True
-                # Use the server’s message that now contains the unread count.
-                self.statusBar().showMessage(response.get("message", f"Logged in successfully! Welcome, {self.username}!"))
-            # Once logged in, optionally request initial messages.
-            packet = ClientPacket(
-                type=MessageType.REQUEST_MESSAGES,
-                data={"sender": self.username, "password": self.password}
-            )
-            send_packet_to_server(packet)
-        else:
-            QMessageBox.critical(self, "Login Failed", response.get("message", "Unknown error"))
-            QApplication.quit()
-            subprocess.Popen([sys.executable] + sys.argv)
-
-def receive_data():
-    """Receive data from the server in a loop."""
-    global client_socket
-    while True:
-        try:
-            data: bytes = client_socket.recv(65536)
-            if not data:
-                print("Server disconnected.")
-                break
-            process_server_message_gui(data)
+            # If you don't have the file, you can use a gradient as fallback
+            if background_image.isNull():
+                palette = QPalette()
+                palette.setColor(QPalette.Window, Qt.blue)
+                self.setPalette(palette)
+                print("Using fallback background color - place 'subway_surfers_bg.jpg' in app directory for image")
+            else:
+                palette = QPalette()
+                palette.setBrush(QPalette.Window, QBrush(background_image.scaled(
+                    self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
+                self.setPalette(palette)
         except Exception as e:
-            print("Error receiving data:", e)
-            break
-    client_socket.close()
-    sys.exit(0)
+            print(f"Failed to set background: {e}")
+        
+    def connect_to_server(self):
+        server_address = self.server_input.text()
+        
+        try:
+            # Create gRPC channel
+            self.channel = grpc.insecure_channel(server_address)
+            self.stub = chat_pb2_grpc.ChatServiceStub(self.channel)
+            
+            # Show login dialog
+            login_dialog = LoginDialog(self)
+            result = login_dialog.exec_()
+            
+            if result == QDialog.Accepted:
+                username, password_hash, create_mode = login_dialog.get_credentials()
+                
+                if create_mode:
+                    self.create_account(username, password_hash)
+                else:
+                    self.login(username, password_hash)
+                    
+        except grpc.RpcError as e:
+            QMessageBox.critical(self, "Connection Error", 
+                                f"Failed to connect to server: {e}")
+            
+    def create_account(self, username, password_hash):
+        try:
+            request = chat_pb2.CreateAccountRequest(
+                username=username,
+                password_hash=password_hash
+            )
+            
+            response = self.stub.CreateAccount(request)
+            
+            if response.success:
+                QMessageBox.information(self, "Success", response.message)
+                self.login(username, password_hash)
+            else:
+                if response.account_exists:
+                    # Account exists, try logging in instead
+                    self.login(username, password_hash)
+                else:
+                    QMessageBox.warning(self, "Account Creation Failed", response.message)
+                    
+        except grpc.RpcError as e:
+            QMessageBox.critical(self, "Error", f"Failed to create account: {e}")
+            
+    def login(self, username, password_hash):
+        try:
+            request = chat_pb2.LoginRequest(
+                username=username,
+                password_hash=password_hash
+            )
+            
+            response = self.stub.Login(request)
+            
+            if response.success:
+                self.username = username
+                self.session_token = response.session_token
+                
+                # Start message receiver thread
+                self.start_message_receiver()
+                
+                # Update UI
+                self.user_label.setText(f"Logged in as: {username}")
+                self.stacked_widget.setCurrentWidget(self.chat_widget)
+                
+                # Show notification about unread messages instead of loading them automatically
+                if response.unread_message_count > 0:
+                    QMessageBox.information(self, "New Messages", 
+                                           f"You have {response.unread_message_count} unread messages. Click 'Get Messages' to view them.")
+            else:
+                QMessageBox.warning(self, "Login Failed", response.message)
+                
+        except grpc.RpcError as e:
+            QMessageBox.critical(self, "Error", f"Failed to login: {e}")
+            
+    def start_message_receiver(self):
+        # Stop existing receiver if any
+        if self.message_receiver:
+            self.message_receiver.stop()
+            self.message_receiver.wait()
+            
+        # Start new receiver
+        self.message_receiver = MessageReceiver(self.stub, self.username, self.session_token)
+        self.message_receiver.message_received.connect(self.handle_new_message)
+        self.message_receiver.start()
+        
+    @pyqtSlot(object)
+    def handle_new_message(self, message):
+        """Handle a new message from the server"""
+        # Add to message list
+        item = MessageListItem(message)
+        self.message_list.addItem(item)
+        
+        # Store full message data
+        self.messages_data[message.message_id] = message
+        
+        # Also display in the text view
+        self.message_display.append(
+            f"<b>From: {message.sender}</b> <i>({time.ctime(message.timestamp)})</i><br>"
+            f"{message.content}<br>"
+            f"------------------------------<br>"
+        )
+        
+    def display_message_content(self, item):
+        """Display the selected message content in the detail view"""
+        if isinstance(item, MessageListItem):
+            message = self.messages_data.get(item.message_id)
+            if message:
+                self.message_display.clear()
+                self.message_display.append(
+                    f"<b>From: {message.sender}</b> <i>({time.ctime(message.timestamp)})</i><br>"
+                    f"{message.content}<br>"
+                )
+        
+    def logout(self):
+        try:
+            # Stop message receiver first to prevent any thread issues
+            if self.message_receiver:
+                self.message_receiver.stop()
+                # Wait for the thread to finish but with a timeout
+                if not self.message_receiver.wait(1000):  # 1 second timeout
+                    print("Warning: Message receiver thread did not terminate cleanly")
+                self.message_receiver = None
+                
+            # Clear session data
+            self.username = None
+            self.session_token = None
+            
+            # Clear UI
+            self.message_display.clear()
+            self.message_list.clear()
+            self.message_input.clear()
+            self.recipient_input.clear()
+            self.users_list.clear()
+            self.messages_data.clear()
+            
+            # Show login screen
+            self.stacked_widget.setCurrentWidget(self.login_widget)
+        except Exception as e:
+            print(f"Error during logout: {e}")
+            # Even if there's an error, try to reset the UI
+            self.stacked_widget.setCurrentWidget(self.login_widget)
+        
+    def get_messages(self):
+        if not self.session_token:
+            QMessageBox.warning(self, "Not Logged In", "You must be logged in to get messages.")
+            return
+            
+        try:
+            request = chat_pb2.GetMessagesRequest(
+                username=self.username,
+                limit=self.message_count_input.value(),
+                session_token=self.session_token
+            )
+            
+            response = self.stub.GetMessages(request)
+            
+            # Clear previous messages
+            self.user_messages = []
+            self.message_list.clear()
+            self.messages_data.clear()
+            self.message_display.clear()
+            
+            # Display messages
+            if response.messages:
+                for message in response.messages:
+                    # Add to message IDs list
+                    self.user_messages.append(message.message_id)
+                    
+                    # Add to message list widget
+                    item = MessageListItem(message)
+                    self.message_list.addItem(item)
+                    
+                    # Store full message data
+                    self.messages_data[message.message_id] = message
+                    
+                if response.remaining_messages > 0:
+                    QMessageBox.information(self, "More Messages", 
+                                          f"You have {response.remaining_messages} more messages.")
+            else:
+                QMessageBox.information(self, "No Messages", "You have no messages.")
+                
+        except grpc.RpcError as e:
+            QMessageBox.critical(self, "Error", f"Failed to get messages: {e}")
+    
+    def delete_selected_messages(self):
+        """Delete only the selected messages"""
+        selected_items = self.message_list.selectedItems()
+        
+        if not selected_items:
+            QMessageBox.information(self, "No Selection", "Please select messages to delete.")
+            return
+        
+        message_ids = [item.message_id for item in selected_items]
+        
+        reply = QMessageBox.question(self, "Confirm Deletion", 
+                                     f"Are you sure you want to delete {len(message_ids)} selected messages?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     
+        if reply == QMessageBox.Yes:
+            try:
+                request = chat_pb2.DeleteMessagesRequest(
+                    username=self.username,
+                    message_ids=message_ids,
+                    session_token=self.session_token
+                )
+                
+                response = self.stub.DeleteMessages(request)
+                
+                if response.success:
+                    # Fix: Use length of selected items to show the correct count
+                    QMessageBox.information(self, "Success", 
+                                          f"Deleted {len(message_ids)} messages.")
+                    
+                    # Remove deleted messages from UI and data structures
+                    for item in selected_items:
+                        msg_id = item.message_id
+                        row = self.message_list.row(item)
+                        self.message_list.takeItem(row)
+                        if msg_id in self.messages_data:
+                            del self.messages_data[msg_id]
+                        if msg_id in self.user_messages:
+                            self.user_messages.remove(msg_id)
+                    
+                    self.message_display.clear()
+                else:
+                    QMessageBox.warning(self, "Deletion Failed", response.message)
+                    
+            except grpc.RpcError as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete messages: {e}")
+            
+    def delete_all_messages(self):
+        if not self.user_messages:
+            QMessageBox.information(self, "No Messages", "No messages to delete.")
+            return
+            
+        reply = QMessageBox.question(self, "Confirm Deletion", 
+                                     "Are you sure you want to delete all messages?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     
+        if reply == QMessageBox.Yes:
+            try:
+                request = chat_pb2.DeleteMessagesRequest(
+                    username=self.username,
+                    message_ids=self.user_messages,
+                    session_token=self.session_token
+                )
+                
+                response = self.stub.DeleteMessages(request)
+                
+                if response.success:
+                    QMessageBox.information(self, "Success", 
+                                          f"Deleted {response.deleted_count} messages.")
+                    self.message_display.clear()
+                    self.message_list.clear()
+                    self.user_messages = []
+                    self.messages_data.clear()
+                else:
+                    QMessageBox.warning(self, "Deletion Failed", response.message)
+                    
+            except grpc.RpcError as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete messages: {e}")
+                
+    def send_message(self):
+        recipient = self.recipient_input.text()
+        content = self.message_input.toPlainText()
+        
+        if not recipient or not content:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a recipient and message content.")
+            return
+            
+        try:
+            request = chat_pb2.SendMessageRequest(
+                sender=self.username,
+                recipient=recipient,
+                content=content,
+                session_token=self.session_token
+            )
+            
+            response = self.stub.SendMessage(request)
+            
+            if response.success:
+                QMessageBox.information(self, "Success", "Message sent successfully.")
+                self.message_input.clear()
+            else:
+                QMessageBox.warning(self, "Send Failed", response.message)
+                
+        except grpc.RpcError as e:
+            QMessageBox.critical(self, "Error", f"Failed to send message: {e}")
+            
+    def show_users_tab(self):
+        self.tabs.setCurrentWidget(self.users_tab)
+        self.search_users()
+        
+    def search_users(self):
+        pattern = self.user_search_input.text()
+        
+        try:
+            request = chat_pb2.ListAccountsRequest(
+                pattern=pattern,
+                page=self.current_page,
+                page_size=10,
+                session_token=self.session_token
+            )
+            
+            response = self.stub.ListAccounts(request)
+            
+            # Update pagination info
+            self.current_page = response.current_page
+            self.total_pages = response.total_pages
+            self.page_label.setText(f"Page {self.current_page} of {self.total_pages}")
+            
+            # Enable/disable pagination buttons
+            self.prev_page_button.setEnabled(self.current_page > 1)
+            self.next_page_button.setEnabled(self.current_page < self.total_pages)
+            
+            # Display users
+            self.users_list.clear()
+            for username in response.usernames:
+                self.users_list.addItem(username)
+                
+        except grpc.RpcError as e:
+            QMessageBox.critical(self, "Error", f"Failed to list users: {e}")
+            
+    def previous_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.search_users()
+            
+    def next_page(self):
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.search_users()
+            
+    def select_user(self, item):
+        self.recipient_input.setText(item.text())
+        self.tabs.setCurrentWidget(self.send_tab)
+        
+    def delete_account(self):
+        reply = QMessageBox.question(self, "Confirm Deletion", 
+                                 "Are you sure you want to delete your account? This cannot be undone.",
+                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                 
+        if reply == QMessageBox.Yes:
+            # Ask for password confirmation
+            password, ok = QInputDialog.getText(self, "Password Confirmation", 
+                                             "Enter your password to confirm:", 
+                                             QLineEdit.Password)
+                                             
+            if ok and password:
+                try:
+                    request = chat_pb2.DeleteAccountRequest(
+                        username=self.username,
+                        password_hash=hash_password(password),
+                        session_token=self.session_token
+                    )
+                    
+                    response = self.stub.DeleteAccount(request)
+                    
+                    if response.success:
+                        QMessageBox.information(self, "Success", "Account deleted successfully.")
+                        self.logout()
+                    else:
+                        QMessageBox.warning(self, "Deletion Failed", response.message)
+                        
+                except grpc.RpcError as e:
+                    QMessageBox.critical(self, "Error", f"Failed to delete account: {e}")
 
-def start_gui():
-    """Creates the QApplication and ChatWindow; then starts the event loop."""
-    global chat_window
+    # Override resize event to maintain background when window is resized
+    def resizeEvent(self, event):
+        self.set_background()
+        super().resizeEvent(event)
+
+if __name__ == '__main__':
     app = QApplication(sys.argv)
-    chat_window = ChatWindow()
-    chat_window.show()
+    client = ChatClient()
+    client.show()
     sys.exit(app.exec_())
-
-if __name__ == "__main__":
-    # Create the client socket and connect.
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        client_socket.connect((SERVER_IP, SERVER_PORT))
-        print(f"Connected to server at {SERVER_IP}:{SERVER_PORT}")
-    except Exception as e:
-        print("Connection error:", e)
-        sys.exit(1)
-
-    # Start a thread to listen for server messages.
-    receive_thread = Thread(target=receive_data, daemon=True)
-    receive_thread.start()
-
-    # Request the server public key and then start the GUI.
-    on_startup()
-    start_gui()
