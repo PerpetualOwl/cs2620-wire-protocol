@@ -6,71 +6,57 @@ import re
 from concurrent import futures
 import threading
 import logging
+import os
+import signal
+import sys
 
 # Import the generated gRPC code
 import chat_pb2
 import chat_pb2_grpc
+import raft_pb2
+import raft_pb2_grpc
+
+from config import Config
+from database import DatabaseManager
+from raft import RaftNode, RaftService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('chat_server')
 
 class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
-    def __init__(self):
-        # In-memory storage (would use a database in production)
-        self.accounts = {}  # username -> {password_hash, online_status}
-        self.messages = {}  # username -> [Message]
+    def __init__(self, raft_node: RaftNode, db: DatabaseManager):
+        self.raft_node = raft_node
+        self.db = db
         self.online_users = {}  # username -> list of message queues for streaming
-        self.sessions = {}  # session_token -> username
-        self.session_lock = threading.Lock()
         
-    def validate_session(self, session_token, username=None):
-        """Validate session token and optionally check if it belongs to the provided username"""
-        with self.session_lock:
-            if session_token not in self.sessions:
-                return False
-            if username and self.sessions[session_token] != username:
-                return False
-            return True
-            
-    def _generate_session_token(self, username):
-        """Generate a unique session token for a user"""
-        token = str(uuid.uuid4())
-        with self.session_lock:
-            self.sessions[token] = username
-        return token
-        
-    def _invalidate_session(self, session_token):
-        """Invalidate a session token"""
-        with self.session_lock:
-            if session_token in self.sessions:
-                del self.sessions[session_token]
-                
-    def _match_pattern(self, username, pattern):
-        """Match username against a wildcard pattern"""
-        if not pattern:
-            return True
-        # Convert wildcard pattern to regex
-        regex_pattern = pattern.replace("*", ".*").replace("?", ".")
-        return re.match(f"^{regex_pattern}$", username) is not None
+    def _replicate_operation(self, operation_type: str, data: bytes) -> bool:
+        """Replicate an operation through Raft consensus"""
+        if self.raft_node.state != NodeState.LEADER:
+            return False
+        return self.raft_node.replicate_log(operation_type, data)
         
     def CreateAccount(self, request, context):
         username = request.username
         password_hash = request.password_hash
         
-        # Check if account exists
-        if username in self.accounts:
+        # Replicate through Raft
+        data = f"{username}:{password_hash}".encode()
+        if not self._replicate_operation('CREATE_USER', data):
             return chat_pb2.CreateAccountResponse(
                 success=False,
-                message="Account already exists. Please login.",
+                message="Failed to replicate operation",
+                account_exists=False
+            )
+            
+        # Check result
+        if self.db.get_user(username):
+            return chat_pb2.CreateAccountResponse(
+                success=False,
+                message="Account already exists",
                 account_exists=True
             )
             
-        # Create new account
-        self.accounts[username] = {"password_hash": password_hash}
-        self.messages[username] = []
-        logger.info(f"Created new account for user: {username}")
-        
         return chat_pb2.CreateAccountResponse(
             success=True,
             message="Account created successfully",
@@ -82,7 +68,8 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         password_hash = request.password_hash
         
         # Check if account exists
-        if username not in self.accounts:
+        user = self.db.get_user(username)
+        if not user:
             return chat_pb2.LoginResponse(
                 success=False,
                 message="Invalid username",
@@ -90,7 +77,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             )
             
         # Verify password
-        if self.accounts[username]["password_hash"] != password_hash:
+        if user['password_hash'] != password_hash:
             return chat_pb2.LoginResponse(
                 success=False,
                 message="Invalid password",
@@ -98,15 +85,20 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
             )
             
         # Generate session token
-        session_token = self._generate_session_token(username)
-        
-        # Mark user as online
-        self.accounts[username]["online"] = True
+        session_token = str(uuid.uuid4())
+        if not self.db.create_session(session_token, username):
+            return chat_pb2.LoginResponse(
+                success=False,
+                message="Failed to create session",
+                unread_message_count=0
+            )
+            
+        # Initialize message queue for streaming
         self.online_users[username] = []
         
         # Count unread messages
-        unread_count = sum(1 for msg in self.messages[username] if not msg.read)
-        logger.info(f"User {username} logged in. Unread messages: {unread_count}")
+        messages = self.db.get_messages(username)
+        unread_count = sum(1 for msg in messages if not msg['read'])
         
         return chat_pb2.LoginResponse(
             success=True,
@@ -116,28 +108,24 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
         
     def ListAccounts(self, request, context):
-        if not self.validate_session(request.session_token):
+        if not self.db.validate_session(request.session_token):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
         pattern = request.pattern
         page = max(1, request.page)
-        page_size = max(10, min(100, request.page_size))  # Between 10 and 100
+        page_size = max(10, min(100, request.page_size))
         
-        # Filter accounts based on pattern
-        filtered_accounts = [
-            username for username in self.accounts.keys()
-            if self._match_pattern(username, pattern)
-        ]
+        # Get filtered usernames
+        usernames = self.db.list_users(pattern)
         
         # Calculate pagination
-        total_accounts = len(filtered_accounts)
+        total_accounts = len(usernames)
         total_pages = (total_accounts + page_size - 1) // page_size
         
         # Get accounts for current page
         start_idx = (page - 1) * page_size
         end_idx = min(start_idx + page_size, total_accounts)
-        
-        page_accounts = filtered_accounts[start_idx:end_idx]
+        page_accounts = usernames[start_idx:end_idx]
         
         return chat_pb2.ListAccountsResponse(
             usernames=page_accounts,
@@ -147,203 +135,203 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
         
     def DeleteAccount(self, request, context):
-        username = request.username
-        password_hash = request.password_hash
-        
-        # Validate session
-        if not self.validate_session(request.session_token, username):
+        if not self.db.validate_session(request.session_token, request.username):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
-        # Check if account exists
-        if username not in self.accounts:
+        # Replicate through Raft
+        if not self._replicate_operation('DELETE_USER', request.username.encode()):
             return chat_pb2.DeleteAccountResponse(
                 success=False,
-                message="Account not found"
+                message="Failed to replicate operation"
             )
             
-        # Verify password
-        if self.accounts[username]["password_hash"] != password_hash:
-            return chat_pb2.DeleteAccountResponse(
-                success=False,
-                message="Invalid password"
-            )
-            
-        # Delete account and associated messages
-        del self.accounts[username]
-        del self.messages[username]
-        
-        # Remove from online users if logged in
-        if username in self.online_users:
-            del self.online_users[username]
-            
-        # Delete messages sent to other users
-        for recipient, msgs in self.messages.items():
-            self.messages[recipient] = [
-                msg for msg in msgs if msg.sender != username
-            ]
-            
-        logger.info(f"Account deleted: {username}")
-        
         return chat_pb2.DeleteAccountResponse(
             success=True,
             message="Account deleted successfully"
         )
         
     def SendMessage(self, request, context):
-        sender = request.sender
-        recipient = request.recipient
-        content = request.content
-        
-        # Validate session
-        if not self.validate_session(request.session_token, sender):
+        if not self.db.validate_session(request.session_token, request.sender):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
-        # Check if sender and recipient exist
-        if sender not in self.accounts:
+        # Check if recipient exists
+        if not self.db.get_user(request.recipient):
             return chat_pb2.SendMessageResponse(
                 success=False,
-                message="Sender account not found"
-            )
-            
-        if recipient not in self.accounts:
-            return chat_pb2.SendMessageResponse(
-                success=False,
-                message="Recipient account not found"
+                message="Recipient not found"
             )
             
         # Create message
         message_id = str(uuid.uuid4())
-        message = chat_pb2.Message(
-            message_id=message_id,
-            sender=sender,
-            recipient=recipient,
-            content=content,
-            timestamp=int(time.time()),
-            read=False
-        )
+        timestamp = int(time.time())
         
+        # Prepare data for replication
+        data = f"{message_id}:{request.sender}:{request.recipient}:{request.content}:{timestamp}"
+        
+        # Replicate through Raft
+        if not self._replicate_operation('SAVE_MESSAGE', data.encode()):
+            return chat_pb2.SendMessageResponse(
+                success=False,
+                message="Failed to replicate message"
+            )
+            
         # If recipient is online, deliver immediately
-        if recipient in self.online_users and self.online_users[recipient]:
-            for queue in self.online_users[recipient]:
+        if request.recipient in self.online_users:
+            message = chat_pb2.Message(
+                message_id=message_id,
+                sender=request.sender,
+                recipient=request.recipient,
+                content=request.content,
+                timestamp=timestamp,
+                read=False
+            )
+            for queue in self.online_users[request.recipient]:
                 queue.append(message)
-            logger.info(f"Message from {sender} to {recipient} delivered immediately")
-        else:
-            # Store message for later delivery
-            self.messages[recipient].append(message)
-            logger.info(f"Message from {sender} to {recipient} queued for later delivery")
-        
-        
-        response =  chat_pb2.SendMessageResponse(
+                
+        return chat_pb2.SendMessageResponse(
             success=True,
             message="Message sent",
             message_id=message_id
         )
-        print(len(response.SerializeToString()))
-        return response
         
     def GetMessages(self, request, context):
-        username = request.username
-        limit = request.limit if request.limit > 0 else 10
-        
-        # Validate session
-        if not self.validate_session(request.session_token, username):
+        if not self.db.validate_session(request.session_token, request.username):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
-        # Check if account exists
-        if username not in self.accounts:
-            context.abort(grpc.StatusCode.NOT_FOUND, "Account not found")
+        # Get messages from database
+        messages = self.db.get_messages(request.username, request.limit)
+        
+        # Convert to protobuf messages
+        proto_messages = []
+        message_ids = []
+        for msg in messages:
+            proto_messages.append(chat_pb2.Message(
+                message_id=msg['message_id'],
+                sender=msg['sender'],
+                recipient=msg['recipient'],
+                content=msg['content'],
+                timestamp=msg['timestamp'],
+                read=bool(msg['read'])
+            ))
+            if not msg['read']:
+                message_ids.append(msg['message_id'])
+                
+        # Mark messages as read
+        if message_ids:
+            self.db.mark_messages_read(message_ids)
             
-        # Get messages
-        user_messages = self.messages[username][:limit]
-        remaining = len(self.messages[username]) - limit
-        
-        # Mark retrieved messages as read
-        for msg in user_messages:
-            msg.read = True
-            
-        # Update messages list (remove retrieved messages)
-        self.messages[username] = self.messages[username][limit:]
-        
-        logger.info(f"Retrieved {len(user_messages)} messages for {username}. {remaining} remaining.")
-        
-        return chat_pb2.GetMessagesResponse(
-            messages=user_messages,
-            remaining_messages=remaining
-        )
+        return chat_pb2.GetMessagesResponse(messages=proto_messages)
         
     def DeleteMessages(self, request, context):
-        username = request.username
-        message_ids = set(request.message_ids)
-        
-        # Validate session
-        if not self.validate_session(request.session_token, username):
+        if not self.db.validate_session(request.session_token):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
-        # Check if account exists
-        if username not in self.accounts:
-            context.abort(grpc.StatusCode.NOT_FOUND, "Account not found")
+        # Replicate through Raft
+        data = ','.join(request.message_ids).encode()
+        if not self._replicate_operation('DELETE_MESSAGES', data):
+            return chat_pb2.DeleteMessagesResponse(
+                success=False,
+                message="Failed to replicate operation"
+            )
             
-        # Delete messages
-        original_count = len(self.messages[username])
-        self.messages[username] = [
-            msg for msg in self.messages[username]
-            if msg.message_id not in message_ids
-        ]
-        deleted_count = original_count - len(self.messages[username])
-        
-        logger.info(f"Deleted {deleted_count} messages for user {username}")
-        
         return chat_pb2.DeleteMessagesResponse(
             success=True,
-            message=f"Deleted {deleted_count} messages",
-            deleted_count=deleted_count
+            message="Messages deleted"
         )
         
     def ReceiveMessages(self, request, context):
-        username = request.username
-        
-        # Validate session
-        if not self.validate_session(request.session_token, username):
+        if not self.db.validate_session(request.session_token, request.username):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
-        # Check if account exists
-        if username not in self.accounts:
-            context.abort(grpc.StatusCode.NOT_FOUND, "Account not found")
-            
-        # Create message queue for this stream
+        # Create message queue for this connection
         message_queue = []
-        
-        # Register this queue for real-time message delivery
-        if username not in self.online_users:
-            self.online_users[username] = []
-        self.online_users[username].append(message_queue)
-        
+        if request.username in self.online_users:
+            self.online_users[request.username].append(message_queue)
+        else:
+            self.online_users[request.username] = [message_queue]
+            
         try:
             while context.is_active():
-                # Check for new messages
-                if message_queue:
+                # Wait for new messages
+                while len(message_queue) == 0 and context.is_active():
+                    time.sleep(0.1)
+                    
+                # Send any new messages
+                while message_queue and context.is_active():
                     yield message_queue.pop(0)
-                else:
-                    time.sleep(0.5)  # Wait a bit before checking again
         finally:
-            # Clean up when the stream ends
-            if username in self.online_users and message_queue in self.online_users[username]:
-                self.online_users[username].remove(message_queue)
-                if not self.online_users[username]:
-                    del self.online_users[username]
-                    self.accounts[username]["online"] = False
-
-def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    chat_pb2_grpc.add_ChatServiceServicer_to_server(ChatServicer(), server)
-    server.add_insecure_port('[::]:50051')
-    server.start()
-    logger.info("Server started on port 50051")
+            # Clean up
+            if request.username in self.online_users:
+                self.online_users[request.username].remove(message_queue)
+                if not self.online_users[request.username]:
+                    del self.online_users[request.username]
+                    
+def serve(server_id: str, config_path: str = None):
+    # Load configuration
+    config = Config()
+    if config_path:
+        # TODO: Load config from file
+        pass
+        
+    # Get server config
+    server_config = config.get_server(server_id)
+    if not server_config:
+        logger.error(f"No configuration found for server {server_id}")
+        return
+        
+    # Initialize database
+    db = DatabaseManager(config.get_db_path(server_id))
+    
+    # Initialize Raft node
+    raft_node = RaftNode(server_id, config, db)
+    
+    # Create gRPC servers
+    raft_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    chat_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    
+    # Add servicers
+    raft_pb2_grpc.add_RaftServiceServicer_to_server(
+        RaftService(raft_node),
+        raft_server
+    )
+    chat_pb2_grpc.add_ChatServiceServicer_to_server(
+        ChatServicer(raft_node, db),
+        chat_server
+    )
+    
+    # Start servers
+    raft_server.add_insecure_port(server_config.address)
+    chat_server.add_insecure_port(server_config.client_address)
+    
+    raft_server.start()
+    chat_server.start()
+    
+    logger.info(f"Server {server_id} started")
+    logger.info(f"Raft service listening on {server_config.address}")
+    logger.info(f"Chat service listening on {server_config.client_address}")
+    
+    # Handle shutdown
+    def shutdown(signum, frame):
+        logger.info("Shutting down...")
+        raft_server.stop(0)
+        chat_server.stop(0)
+        sys.exit(0)
+        
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+    
+    # Keep alive
     try:
-        server.wait_for_termination()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
-        logger.info("Server shutting down")
-        server.stop(0)
-
-if __name__ == '__main__':
-    serve()
+        shutdown(None, None)
+        
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python server.py <server_id> [config_path]")
+        sys.exit(1)
+        
+    server_id = sys.argv[1]
+    config_path = sys.argv[2] if len(sys.argv) > 2 else None
+    serve(server_id, config_path)

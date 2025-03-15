@@ -1,111 +1,156 @@
-# gRPC Chat Application
+# Replicated Chat System
 
-This is a simple client-server chat application implemented using gRPC and PyQt5. The application allows users to create accounts, send and receive messages, list other users, and manage their account.
+A fault-tolerant chat application that uses the Raft consensus algorithm for replication and SQLite for persistence.
 
 ## Features
 
-- Account management (create, login, delete)
-- Message operations (send, receive, delete)
-- Real-time message delivery using gRPC streaming
-- User listing with wildcard pattern matching
-- Password hashing for security
-- PyQt5 graphical interface
+- **Persistence**: All messages and user data are stored in SQLite databases
+- **2-Fault Tolerance**: System continues working with up to 2 server failures
+- **Cross-Machine Support**: Can run servers on different machines
+- **Automatic Leader Election**: Uses Raft consensus for leader election
+- **Automatic Recovery**: Servers can recover state after crashes
+- **Client Failover**: Clients automatically reconnect to available servers
 
 ## Requirements
 
-- Python 3.6+
-- gRPC and gRPC tools
-- PyQt5
+- Python 3.8+
+- Dependencies listed in requirements.txt
 
-## Setup
+## Installation
 
-1. Install required Python packages:
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/replicated-chat.git
+   cd replicated-chat
+   ```
 
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. Generate gRPC code:
+   ```bash
+   python generate_grpc.py
+   ```
+
+## Running the System
+
+### Local Testing (Single Machine)
+
+1. Start three server instances:
+   ```bash
+   # Terminal 1
+   python server.py server1
+
+   # Terminal 2
+   python server.py server2
+
+   # Terminal 3
+   python server.py server3
+   ```
+
+2. Start the client:
+   ```bash
+   python client.py
+   ```
+
+### Multi-Machine Deployment
+
+1. Create a configuration file (e.g., `config.env`) on each machine:
+   ```bash
+   # Example for a three-node cluster
+   CHAT_SERVERS=server1:192.168.1.10:50051,server2:192.168.1.11:50051,server3:192.168.1.12:50051
+   ```
+
+2. Start servers on each machine:
+   ```bash
+   # On machine 1
+   python server.py server1 config.env
+
+   # On machine 2
+   python server.py server2 config.env
+
+   # On machine 3
+   python server.py server3 config.env
+   ```
+
+3. Start clients on any machine:
+   ```bash
+   python client.py config.env
+   ```
+
+## Testing
+
+Run the test suite:
 ```bash
-pip install grpcio grpcio-tools PyQt5
+python -m pytest test.py
 ```
 
-2. Generate gRPC code from proto file:
+## Architecture
 
-```bash
-# Place chat.proto in the proto directory
-mkdir -p proto
-cp chat.proto proto/
+### Server Components
 
-# Run the code generator script
-python generate_grpc.py
-```
+1. **Chat Service**: Handles client requests for chat operations
+2. **Raft Consensus**: Manages server replication and leader election
+3. **Persistent Storage**: SQLite database for durable storage
 
-This will generate the `chat_pb2.py` and `chat_pb2_grpc.py` files required for the application.
+### Client Components
 
-## Running the Application
+1. **Chat Client**: Handles communication with servers
+2. **GUI**: PyQt5-based user interface
+3. **Automatic Failover**: Reconnects to available servers on failure
 
-1. Start the server:
+### Replication Protocol
 
-```bash
-python server.py
-```
+The system uses the Raft consensus algorithm for:
+- Leader election
+- Log replication
+- Configuration changes
 
-The server will start on port 50051 by default.
+### Data Persistence
 
-2. Launch the client:
+Each server maintains its own SQLite database with tables for:
+- Users
+- Messages
+- Sessions
+- Raft state
+- Raft log
 
-```bash
-python client.py
-```
+## Fault Tolerance
 
-The client will connect to the server on `localhost:50051` by default. You can change this in the client UI.
+The system can tolerate up to 2 server failures while maintaining:
+- Data consistency
+- Service availability
+- Message delivery
 
-## File Structure
+## Demo Instructions
 
-- `chat.proto`: Protocol Buffer definition for the chat service
-- `chat_server.py`: Server implementation
-- `chat_client.py`: PyQt5 client implementation
-- `generate_grpc.py`: Helper script to generate gRPC code from proto file
+To demonstrate fault tolerance:
 
-## gRPC vs Custom Wire Protocol/JSON
+1. Start all three servers
+2. Create some user accounts and send messages
+3. Kill one or two servers
+4. Observe that the system continues to work
+5. Restart the failed servers
+6. Verify that they recover and sync their state
 
-### What has changed?
+## Limitations
 
-#### Protocol Definition
+- Maximum of 2 simultaneous server failures
+- Brief service interruption during leader election
+- Requires majority of servers to be available
 
-- With gRPC, the protocol is defined in a `.proto` file using Protocol Buffers.
-- The client and server code is generated from this definition.
-- This ensures consistent data structures and prevents errors.
+## Future Improvements
 
-#### Implementation
-
-- The server implements the service defined in the proto file
-- The client connects to the server using gRPC stubs
-- Streaming is handled natively by gRPC
-
-#### Data Size
-
-gRPC uses Protocol Buffers which is a binary format, rather than JSON or a custom text-based protocol. This results in:
-- Smaller message sizes
-- Faster serialization/deserialization
-- Native support for streaming (used for real-time messages)
-
-#### Error Handling
-
-gRPC provides built-in error handling and status codes, making it easier to handle failures and edge cases.
-
-## Advantages of gRPC
-
-1. **Smaller message size**: Protocol Buffers are more compact than JSON
-2. **Type safety**: The protocol definition enforces types
-3. **Code generation**: Less boilerplate code needed
-4. **Bi-directional streaming**: Built-in support for streaming
-5. **HTTP/2**: Better performance with multiplexing and header compression
-
-## Disadvantages
-
-1. **Steeper learning curve**: More complex setup compared to simple sockets
-2. **Less human-readable**: Binary format is not human-readable like JSON
-3. **Requires code generation**: Changes to the protocol require regeneration of code
-
-## Generating the proto code if you modify chat.proto
-
-```bash
-python -m grpc_tools.protoc --proto_path=. --python_out=. --grpc_python_out=. chat.proto
-```
+- [ ] Dynamic membership changes
+- [ ] Better conflict resolution
+- [ ] Optimized state transfer
+- [ ] Snapshot support
+- [ ] Read-only queries from followers

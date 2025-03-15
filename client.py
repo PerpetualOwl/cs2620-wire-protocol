@@ -3,8 +3,8 @@ import grpc
 import hashlib
 import threading
 import time
-import uuid
-import re
+import logging
+from typing import List, Optional
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QLabel, QLineEdit, QPushButton, QTextEdit, QListWidget, QListWidgetItem,
                             QStackedWidget, QMessageBox, QInputDialog, QDialog, 
@@ -15,6 +15,11 @@ from PyQt5.QtGui import QPixmap, QPalette, QBrush
 # Import the generated gRPC code
 import chat_pb2
 import chat_pb2_grpc
+from config import Config
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('chat_client')
 
 def hash_password(password):
     """Hash a password using SHA-256"""
@@ -107,21 +112,211 @@ class MessageListItem(QListWidgetItem):
         self.message_id = message.message_id
         self.setToolTip(message.content)
 
-class ChatClient(QMainWindow):
-    def __init__(self):
+class ChatClient:
+    def __init__(self, config: Config):
+        self.config = config
+        self.current_server = None
+        self.stub = None
+        self.session_token = None
+        self.username = None
+        self._connect_to_server()
+        
+    def _connect_to_server(self) -> bool:
+        """Connect to an available server"""
+        for server in self.config.server_list:
+            try:
+                channel = grpc.insecure_channel(server.client_address)
+                stub = chat_pb2_grpc.ChatServiceStub(channel)
+                # Try a simple request to check if server is responsive
+                stub.ListAccounts(chat_pb2.ListAccountsRequest(
+                    session_token="test",
+                    pattern="",
+                    page=1,
+                    page_size=1
+                ))
+                self.current_server = server
+                self.stub = stub
+                logger.info(f"Connected to server at {server.client_address}")
+                return True
+            except grpc.RpcError:
+                continue
+        return False
+        
+    def _ensure_connection(self):
+        """Ensure we have a working server connection"""
+        if self.stub is None or self.current_server is None:
+            if not self._connect_to_server():
+                raise Exception("No available servers")
+                
+    def create_account(self, username: str, password: str) -> bool:
+        """Create a new account"""
+        self._ensure_connection()
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        
+        try:
+            response = self.stub.CreateAccount(chat_pb2.CreateAccountRequest(
+                username=username,
+                password_hash=password_hash
+            ))
+            return response.success
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                # Try to reconnect and retry once
+                if self._connect_to_server():
+                    return self.create_account(username, password)
+            raise
+            
+    def login(self, username: str, password: str) -> bool:
+        """Login to an existing account"""
+        self._ensure_connection()
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        
+        try:
+            response = self.stub.Login(chat_pb2.LoginRequest(
+                username=username,
+                password_hash=password_hash
+            ))
+            if response.success:
+                self.session_token = response.session_token
+                self.username = username
+            return response.success
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                if self._connect_to_server():
+                    return self.login(username, password)
+            raise
+            
+    def list_accounts(self, pattern: str = "", page: int = 1) -> List[str]:
+        """List all accounts matching the pattern"""
+        self._ensure_connection()
+        
+        try:
+            response = self.stub.ListAccounts(chat_pb2.ListAccountsRequest(
+                session_token=self.session_token,
+                pattern=pattern,
+                page=page,
+                page_size=50
+            ))
+            return response.usernames
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                if self._connect_to_server():
+                    return self.list_accounts(pattern, page)
+            raise
+            
+    def delete_account(self, password: str) -> bool:
+        """Delete the current account"""
+        self._ensure_connection()
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        
+        try:
+            response = self.stub.DeleteAccount(chat_pb2.DeleteAccountRequest(
+                username=self.username,
+                password_hash=password_hash,
+                session_token=self.session_token
+            ))
+            if response.success:
+                self.session_token = None
+                self.username = None
+            return response.success
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                if self._connect_to_server():
+                    return self.delete_account(password)
+            raise
+            
+    def send_message(self, recipient: str, content: str) -> bool:
+        """Send a message to another user"""
+        self._ensure_connection()
+        
+        try:
+            response = self.stub.SendMessage(chat_pb2.SendMessageRequest(
+                sender=self.username,
+                recipient=recipient,
+                content=content,
+                session_token=self.session_token
+            ))
+            return response.success
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                if self._connect_to_server():
+                    return self.send_message(recipient, content)
+            raise
+            
+    def get_messages(self, limit: int = 100) -> List[chat_pb2.Message]:
+        """Get messages for the current user"""
+        self._ensure_connection()
+        
+        try:
+            response = self.stub.GetMessages(chat_pb2.GetMessagesRequest(
+                username=self.username,
+                limit=limit,
+                session_token=self.session_token
+            ))
+            return response.messages
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                if self._connect_to_server():
+                    return self.get_messages(limit)
+            raise
+            
+    def delete_messages(self, message_ids: List[str]) -> bool:
+        """Delete specific messages"""
+        self._ensure_connection()
+        
+        try:
+            response = self.stub.DeleteMessages(chat_pb2.DeleteMessagesRequest(
+                message_ids=message_ids,
+                session_token=self.session_token
+            ))
+            return response.success
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                if self._connect_to_server():
+                    return self.delete_messages(message_ids)
+            raise
+            
+    def receive_messages(self, callback):
+        """Start receiving messages in real-time"""
+        self._ensure_connection()
+        
+        def message_stream():
+            while True:
+                try:
+                    request = chat_pb2.ReceiveMessagesRequest(
+                        username=self.username,
+                        session_token=self.session_token
+                    )
+                    for message in self.stub.ReceiveMessages(request):
+                        callback(message)
+                except grpc.RpcError as e:
+                    if e.code() == grpc.StatusCode.UNAVAILABLE:
+                        logger.info("Lost connection to server, attempting to reconnect...")
+                        if self._connect_to_server():
+                            continue
+                    logger.error(f"Error in message stream: {e}")
+                    break
+                except Exception as e:
+                    logger.error(f"Unexpected error in message stream: {e}")
+                    break
+                time.sleep(1)  # Wait before retrying
+                
+        thread = threading.Thread(target=message_stream, daemon=True)
+        thread.start()
+        return thread
+
+class ChatWindow(QMainWindow):
+    def __init__(self, config: Config):
         super().__init__()
+        self.client = ChatClient(config)
+        self.init_ui()
+        
+    def init_ui(self):
         self.setWindowTitle("gRPC Chat Client")
         self.resize(800, 600)
         
         # Set subway surfers background
         self.set_background()
-        
-        # gRPC connection
-        self.channel = None
-        self.stub = None
-        self.session_token = None
-        self.username = None
-        self.message_receiver = None
         
         # Setup UI
         self.central_widget = QWidget()
@@ -339,58 +534,6 @@ class ChatClient(QMainWindow):
         except grpc.RpcError as e:
             QMessageBox.critical(self, "Connection Error", 
                                 f"Failed to connect to server: {e}")
-            
-    def create_account(self, username, password_hash):
-        try:
-            request = chat_pb2.CreateAccountRequest(
-                username=username,
-                password_hash=password_hash
-            )
-            
-            response = self.stub.CreateAccount(request)
-            
-            if response.success:
-                QMessageBox.information(self, "Success", response.message)
-                self.login(username, password_hash)
-            else:
-                if response.account_exists:
-                    # Account exists, try logging in instead
-                    self.login(username, password_hash)
-                else:
-                    QMessageBox.warning(self, "Account Creation Failed", response.message)
-                    
-        except grpc.RpcError as e:
-            QMessageBox.critical(self, "Error", f"Failed to create account: {e}")
-            
-    def login(self, username, password_hash):
-        try:
-            request = chat_pb2.LoginRequest(
-                username=username,
-                password_hash=password_hash
-            )
-            
-            response = self.stub.Login(request)
-            
-            if response.success:
-                self.username = username
-                self.session_token = response.session_token
-                
-                # Start message receiver thread
-                self.start_message_receiver()
-                
-                # Update UI
-                self.user_label.setText(f"Logged in as: {username}")
-                self.stacked_widget.setCurrentWidget(self.chat_widget)
-                
-                # Show notification about unread messages instead of loading them automatically
-                if response.unread_message_count > 0:
-                    QMessageBox.information(self, "New Messages", 
-                                           f"You have {response.unread_message_count} unread messages. Click 'Get Messages' to view them.")
-            else:
-                QMessageBox.warning(self, "Login Failed", response.message)
-                
-        except grpc.RpcError as e:
-            QMessageBox.critical(self, "Error", f"Failed to login: {e}")
             
     def start_message_receiver(self):
         # Stop existing receiver if any
@@ -690,8 +833,18 @@ class ChatClient(QMainWindow):
         self.set_background()
         super().resizeEvent(event)
 
-if __name__ == '__main__':
+def main():
     app = QApplication(sys.argv)
-    client = ChatClient()
-    client.show()
+    
+    # Load configuration
+    config = Config()
+    if len(sys.argv) > 1:
+        # TODO: Load config from file
+        pass
+        
+    window = ChatWindow(config)
+    window.show()
     sys.exit(app.exec_())
+
+if __name__ == '__main__':
+    main()
