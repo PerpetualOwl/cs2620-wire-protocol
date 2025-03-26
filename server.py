@@ -298,7 +298,7 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
 
 def serve(server_id: str, config_path: str = None):
     # Load configuration
-    config = Config(3)
+    config = Config()  # Default to 5 servers
     if config_path:
         # TODO: Load config from file
         pass
@@ -306,8 +306,23 @@ def serve(server_id: str, config_path: str = None):
     if not server_config:
         logger.error(f"No configuration found for server {server_id}")
         return
+    
+    # Create data directory if it doesn't exist
+    os.makedirs(config.db_directory, exist_ok=True)
+    
     db = DatabaseManager(config.get_db_path(server_id))
+    
+    # Determine if we're in single-server mode
+    single_server_mode = len(config.server_list) == 1
+    
     raft_node = RaftNode(server_id, config, db)
+    # If we're in single-server mode, immediately become leader
+    if single_server_mode:
+        logger.info("Running in single-server mode, becoming leader immediately")
+        raft_node.state = NodeState.LEADER
+        raft_node.current_term = 1
+        raft_node.voted_for = server_id
+    
     raft_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     chat_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     raft_pb2_grpc.add_RaftServiceServicer_to_server(RaftService(raft_node), raft_server)

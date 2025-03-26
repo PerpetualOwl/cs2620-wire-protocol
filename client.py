@@ -129,6 +129,28 @@ class ChatClient:
         
     def _connect_to_server(self) -> bool:
         """Connect to an available server"""
+        # First try a random server
+        random_server = self.config.get_random_server()
+        if random_server:
+            try:
+                channel = grpc.insecure_channel(random_server.client_address)
+                stub = chat_pb2_grpc.ChatServiceStub(channel)
+                # Try a simple request to check if server is responsive
+                stub.ListAccounts(chat_pb2.ListAccountsRequest(
+                    session_token="test",
+                    pattern="",
+                    page=1,
+                    page_size=1
+                ))
+                self.current_server = random_server
+                self.stub = stub
+                logger.info(f"Connected to server at {random_server.client_address}")
+                return True
+            except grpc.RpcError as e:
+                logger.info(f"Failed to connect to random server: {e}")
+                # Fall back to trying all servers
+        
+        # If random server failed or wasn't available, try all servers
         for server in self.config.server_list:
             try:
                 channel = grpc.insecure_channel(server.client_address)
@@ -145,7 +167,7 @@ class ChatClient:
                 logger.info(f"Connected to server at {server.client_address}")
                 return True
             except grpc.RpcError as e:
-                print(e)
+                logger.info(f"Failed to connect to server {server.id}: {e}")
                 continue
         return False
         

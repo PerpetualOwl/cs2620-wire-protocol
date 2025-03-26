@@ -627,16 +627,7 @@ class TestChatClient(unittest.TestCase):
         self.assertEqual(args.username, self.client.username)
         self.assertEqual(args.session_token, self.client.session_token)
     
-
-
-
 import sqlite3
-
-if __name__ == '__main__':
-    unittest.main()
-    
-
-
 
 if __name__ == '__main__':
     unittest.main()
