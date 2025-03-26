@@ -45,7 +45,7 @@ class MessageReceiver(QThread):
         for server in self.config.server_list:
             print(server)
             try:
-                channel = grpc.secure_channel(server.client_address, credentials=credentials)
+                channel = grpc.insecure_channel(server.client_address)
                 stub = chat_pb2_grpc.ChatServiceStub(channel)
                 request = chat_pb2.ReceiveMessagesRequest(
                     username=self.username,
@@ -142,7 +142,7 @@ class ChatClient:
         random_server = self.config.get_random_server()
         if random_server:
             try:
-                channel = grpc.secure_channel(random_server.client_address, credentials=credentials)
+                channel = grpc.insecure_channel(random_server.client_address)
                 stub = chat_pb2_grpc.ChatServiceStub(channel)
                 # Try a simple request to check if server is responsive
                 stub.ListAccounts(chat_pb2.ListAccountsRequest(
@@ -166,7 +166,7 @@ class ChatClient:
         credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         for server in self.config.server_list:
             try:
-                channel = grpc.secure_channel(server.client_address, credentials=credentials)
+                channel = grpc.insecure_channel(server.client_address)
                 stub = chat_pb2_grpc.ChatServiceStub(channel)
                 # Try a simple request to check if server is responsive
                 stub.ListAccounts(chat_pb2.ListAccountsRequest(
@@ -563,7 +563,7 @@ class ChatWindow(QMainWindow):
         credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         try:
             # Create gRPC channel
-            self.channel = grpc.secure_channel(server_address, credentials=credentials)
+            self.channel = grpc.insecure_channel(server_address)
             self.stub = chat_pb2_grpc.ChatServiceStub(self.channel)
             self.stub = self.client.stub
             
