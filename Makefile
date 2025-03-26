@@ -60,7 +60,14 @@ run-all:
 	$(PYTHON_VENV) server.py server1 & \
 	$(PYTHON_VENV) server.py server2 & \
 	$(PYTHON_VENV) server.py server3 & \
+	$(PYTHON_VENV) client.py & \
 	$(PYTHON_VENV) client.py
+
+run-all-s:
+	@echo "Starting all servers..."
+	$(PYTHON_VENV) server.py server1 & \
+	$(PYTHON_VENV) server.py server2 & \
+	$(PYTHON_VENV) server.py server3 
 
 # Help
 help:
@@ -74,4 +81,5 @@ help:
 	@echo "  make run-server3 - Run server3"
 	@echo "  make run-client - Run client"
 	@echo "  make run-all    - Run all servers and client"
+	@echo "  make run-all-s  - Show this help message"
 	@echo "  make help       - Show this help message"

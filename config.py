@@ -17,17 +17,15 @@ class ServerConfig:
         return f"{self.host}:{self.client_port}"
 
 class Config:
-    def __init__(self):
+    def __init__(self, num_servers):
         # Default configuration for local testing
-        self.servers: Dict[str, ServerConfig] = {
-            "server1": ServerConfig("server1", "localhost", 50051),
-            "server2": ServerConfig("server2", "localhost", 50052),
-            "server3": ServerConfig("server3", "localhost", 50053),
-        }
+        self.servers: Dict[str, ServerConfig] = {}
+        for i in range(1, num_servers+1):
+            self.servers["server"+str(i)] = ServerConfig("server" + str(i), "localhost", 50050 + i)
         
         # Election timeout range in milliseconds
-        self.election_timeout_min = 150
-        self.election_timeout_max = 300
+        self.election_timeout_min = 500
+        self.election_timeout_max = 1000
         
         # Heartbeat interval in milliseconds
         self.heartbeat_interval = 50
