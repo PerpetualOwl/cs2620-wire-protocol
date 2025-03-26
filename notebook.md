@@ -289,3 +289,44 @@ Intuitively, it should be smaller because it codegens custom serialization funct
 For the old MESSAGE_RECEIVED response, we took 138 bytes in our packet. However, for gRPC, we only needed 54 bytes. It is clearly a lot more efficient. 
 
 Github Link: https://github.com/PerpetualOwl/cs2620-wire-protocol
+
+## 3/26/25
+
+### Update 1: Enhanced Multi-Server Support
+
+We've implemented significant improvements to the distributed architecture of our chat system, enabling it to run efficiently across multiple machines. The key changes include:
+
+1. Configuration System Overhaul:
+   - Modified `config.py` to load server IP addresses from environment variables
+   - Added support for up to 5 servers with individual IP configuration
+   - Implemented a `get_random_server()` method to allow clients to connect to any available server
+   - Added dotenv support for easier configuration management
+
+2. Server Enhancements:
+   - Updated the `serve()` function in `server.py` to better handle multi-server configurations
+   - Improved single-server mode detection and automatic leader election
+   - Added automatic data directory creation
+   - Enhanced logging for better debugging of distributed setups
+
+3. Client Improvements:
+   - Implemented smart server selection that first tries a random server
+   - Added robust failover logic to try all available servers if the random one fails
+   - Improved error handling and logging for connection issues
+   - Added SSL certificate handling for secure connections
+
+4. Makefile Updates:
+   - Added targets for running 1-5 servers (`run-servers-1` through `run-servers-5`)
+   - Created individual server targets (`run-server1` through `run-server5`)
+   - Updated the `run-all` target to include all 5 servers
+   - Added better help documentation
+
+5. Environment Configuration:
+   - Created a `.env.example` file with placeholders for server IP addresses
+   - Configured the system to use `SERVER1_IP` through `SERVER5_IP` variables
+   - Made the environment shared across all servers for consistent configuration
+
+These changes significantly improve the system's flexibility for deployment across multiple machines. We can now run anywhere from 1 to 5 servers on different machines, with the client automatically selecting and connecting to an available server. This enhances both scalability and fault tolerance, as the system can now operate with up to 2 server failures in a 5-server configuration.
+
+The implementation follows the Raft consensus algorithm principles, ensuring data consistency across the distributed system. We've also made sure that servers can automatically detect whether they're running in a single-server or multi-server mode and adjust their behavior accordingly.
+
+Next steps could include implementing secure communication with TLS/SSL (we've already added the groundwork with the certifi integration), adding load balancing for client connections, and creating automated deployment scripts for easier management of the distributed system.

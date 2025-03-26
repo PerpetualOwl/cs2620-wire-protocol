@@ -5,11 +5,12 @@ A fault-tolerant chat application that uses the Raft consensus algorithm for rep
 ## Features
 
 - **Persistence**: All messages and user data are stored in SQLite databases
-- **2-Fault Tolerance**: System continues working with up to 2 server failures
-- **Cross-Machine Support**: Can run servers on different machines
+- **Multi-Server Support**: Can run up to 5 servers simultaneously
+- **Distributed Deployment**: Servers can run on different machines with configurable IP addresses
+- **Fault Tolerance**: System continues working with server failures (N-1)/2 fault tolerance with N servers
 - **Automatic Leader Election**: Uses Raft consensus for leader election
 - **Automatic Recovery**: Servers can recover state after crashes
-- **Client Failover**: Clients automatically reconnect to available servers
+- **Smart Client Failover**: Clients automatically connect to a random server and failover to others if needed
 
 ## Requirements
 
@@ -42,48 +43,91 @@ A fault-tolerant chat application that uses the Raft consensus algorithm for rep
 
 ## Running the System
 
+### Using the Makefile
+
+The system includes a Makefile with various targets for easy management:
+
+```bash
+# Set up the environment and dependencies
+make setup
+
+# Generate gRPC code
+make generate
+
+# Run a specific number of servers (1-5)
+make run-servers-1  # Run 1 server
+make run-servers-3  # Run 3 servers
+make run-servers-5  # Run all 5 servers
+
+# Run individual servers
+make run-server1
+make run-server2
+# ... and so on
+
+# Run a client
+make run-client
+
+# Run all servers and a client
+make run-all
+```
+
 ### Local Testing (Single Machine)
 
-1. Start three server instances:
+1. Configure the `.env` file (copy from `.env.example` if needed):
    ```bash
-   # Terminal 1
+   # For local testing, use localhost/127.0.0.1
+   SERVER1_IP=127.0.0.1
+   SERVER2_IP=127.0.0.1
+   SERVER3_IP=127.0.0.1
+   SERVER4_IP=127.0.0.1
+   SERVER5_IP=127.0.0.1
+   ```
+
+2. Start any number of servers (1-5):
+   ```bash
+   # Using make
+   make run-servers-3  # Starts 3 servers
+   
+   # Or manually
    python server.py server1
-
-   # Terminal 2
    python server.py server2
-
-   # Terminal 3
    python server.py server3
    ```
 
-2. Start the client:
+3. Start the client:
    ```bash
    python client.py
    ```
 
 ### Multi-Machine Deployment
 
-1. Create a configuration file (e.g., `config.env`) on each machine:
+1. Create/update the `.env` file on all machines with the actual IP addresses:
    ```bash
-   # Example for a three-node cluster
-   CHAT_SERVERS=server1:192.168.1.10:50051,server2:192.168.1.11:50051,server3:192.168.1.12:50051
+   # Example for a five-node cluster spread across machines
+   SERVER1_IP=192.168.1.10
+   SERVER2_IP=192.168.1.10
+   SERVER3_IP=192.168.1.11
+   SERVER4_IP=192.168.1.12
+   SERVER5_IP=192.168.1.12
    ```
 
-2. Start servers on each machine:
+2. Start each server on its respective machine:
    ```bash
-   # On machine 1
-   python server.py server1 config.env
-
-   # On machine 2
-   python server.py server2 config.env
-
-   # On machine 3
-   python server.py server3 config.env
+   # On the machine with IP 192.168.1.10
+   python server.py server1  # Starts server1
+   python server.py server2  # Starts server2
+   
+   # On the machine with IP 192.168.1.11
+   python server.py server3  # Starts server3
+   
+   # On the machine with IP 192.168.1.12
+   python server.py server4  # Starts server4
+   python server.py server5  # Starts server5
    ```
 
 3. Start clients on any machine:
    ```bash
-   python client.py config.env
+   python client.py  # Client will automatically connect to a random available server
    ```
 
 ## Testing
@@ -125,10 +169,17 @@ Each server maintains its own SQLite database with tables for:
 
 ## Fault Tolerance
 
-The system can tolerate up to 2 server failures while maintaining:
+The system uses the Raft consensus algorithm for fault tolerance:
+- With 3 servers: can tolerate 1 server failure
+- With 5 servers: can tolerate 2 server failures
+- With a single server: operates in standalone mode
+
+While servers are down, the system maintains:
 - Data consistency
 - Service availability
 - Message delivery
+
+Clients automatically connect to available servers if their current server becomes unavailable.
 
 ## Demo Instructions
 
@@ -143,9 +194,10 @@ To demonstrate fault tolerance:
 
 ## Limitations
 
-- Maximum of 2 simultaneous server failures
+- Requires a majority of servers to be available (N/2+1 where N is the total number of servers)
 - Brief service interruption during leader election
-- Requires majority of servers to be available
+- All servers must share the same `.env` configuration
+- Server IDs (server1, server2, etc.) must match their corresponding IP addresses in the `.env` file
 
 ## Future Improvements
 
@@ -154,3 +206,6 @@ To demonstrate fault tolerance:
 - [ ] Optimized state transfer
 - [ ] Snapshot support
 - [ ] Read-only queries from followers
+- [ ] Secure communication with TLS/SSL
+- [ ] Automated deployment with Docker/Kubernetes
+- [ ] Load balancing for client connections
