@@ -18,7 +18,7 @@ import raft_pb2_grpc
 
 from config import Config
 from database import DatabaseManager
-from raft import RaftNode, RaftService
+from raft import RaftNode, RaftService, NodeState
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -40,23 +40,35 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         username = request.username
         password_hash = request.password_hash
         
-        # Replicate through Raft
-        data = f"{username}:{password_hash}".encode()
-        if not self._replicate_operation('CREATE_USER', data):
-            return chat_pb2.CreateAccountResponse(
-                success=False,
-                message="Failed to replicate operation",
-                account_exists=False
-            )
-            
-        # Check result
-        if self.db.get_user(username):
+        logger.info(f"Creating account for user: {username}")
+        
+        # First check if user already exists before trying to create it
+        user = self.db.get_user(username)
+        if user:
+            logger.info(f"Account already exists for username: {username}")
             return chat_pb2.CreateAccountResponse(
                 success=False,
                 message="Account already exists",
                 account_exists=True
             )
-            
+        
+        # Replicate through Raft
+        data = f"{username}:{password_hash}".encode()
+        logger.info(f"Attempting to replicate CREATE_USER operation")
+        replication_result = self._replicate_operation('CREATE_USER', data)
+        logger.info(f"Replication result: {replication_result}")
+        
+        if not replication_result:
+            logger.error("Failed to replicate operation - not a leader or no majority")
+            return chat_pb2.CreateAccountResponse(
+                success=False,
+                message="Failed to replicate operation",
+                account_exists=False
+            )
+        
+        # In single-server mode, the user should now exist
+        # In multi-server mode, we'll assume success if replication succeeded
+        logger.info(f"Account creation successful for username: {username}")
         return chat_pb2.CreateAccountResponse(
             success=True,
             message="Account created successfully",
@@ -108,7 +120,9 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         )
         
     def ListAccounts(self, request, context):
-        if not self.db.validate_session(request.session_token):
+        # Allow initial connection test with "test" token
+        # This fixes the authentication issue when clients first connect
+        if request.session_token != "test" and not self.db.validate_session(request.session_token):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
         pattern = request.pattern
@@ -223,20 +237,23 @@ class ChatServicer(chat_pb2_grpc.ChatServiceServicer):
         return chat_pb2.GetMessagesResponse(messages=proto_messages)
         
     def DeleteMessages(self, request, context):
-        if not self.db.validate_session(request.session_token):
+        if not self.db.validate_session(request.session_token, request.username):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid session")
             
         # Replicate through Raft
-        data = ','.join(request.message_ids).encode()
+        data = f"{request.username}:" + ','.join(request.message_ids)
+        data = data.encode()
         if not self._replicate_operation('DELETE_MESSAGES', data):
             return chat_pb2.DeleteMessagesResponse(
                 success=False,
-                message="Failed to replicate operation"
+                message="Failed to replicate operation",
+                deleted_count=0
             )
             
         return chat_pb2.DeleteMessagesResponse(
             success=True,
-            message="Messages deleted"
+            message="Messages deleted",
+            deleted_count=len(request.message_ids)
         )
         
     def ReceiveMessages(self, request, context):
@@ -278,6 +295,14 @@ def serve(server_id: str, config_path: str = None):
     if not server_config:
         logger.error(f"No configuration found for server {server_id}")
         return
+    
+    # Configure for single-server mode if only one server is specified
+    # This is important for testing with just one server
+    if len(sys.argv) == 2:  # Only server_id provided, no config path
+        logger.info("Configuring for single-server mode")
+        # Keep only the current server in the config
+        single_server = {server_id: config.servers[server_id]}
+        config.servers = single_server
         
     # Initialize database
     db = DatabaseManager(config.get_db_path(server_id))

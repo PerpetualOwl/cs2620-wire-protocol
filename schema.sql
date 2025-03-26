@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS raft_state (
 
 -- Raft log table
 CREATE TABLE IF NOT EXISTS raft_log (
-    index INTEGER PRIMARY KEY,
+    log_index INTEGER PRIMARY KEY,
     term INTEGER NOT NULL,
     operation_type TEXT NOT NULL,
     data BLOB NOT NULL

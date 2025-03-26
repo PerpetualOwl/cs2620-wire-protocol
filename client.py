@@ -309,6 +309,7 @@ class ChatWindow(QMainWindow):
     def __init__(self, config: Config):
         super().__init__()
         self.client = ChatClient(config)
+        self.message_receiver = None
         self.init_ui()
         
     def init_ui(self):
@@ -534,6 +535,41 @@ class ChatWindow(QMainWindow):
         except grpc.RpcError as e:
             QMessageBox.critical(self, "Connection Error", 
                                 f"Failed to connect to server: {e}")
+    
+    def create_account(self, username, password_hash):
+        """Create a new account by delegating to the client instance"""
+        try:
+            success = self.client.create_account(username, password_hash)
+            if success:
+                QMessageBox.information(self, "Success", "Account created successfully!")
+                # Now login with the new account
+                self.login(username, password_hash)
+            else:
+                QMessageBox.warning(self, "Error", "Failed to create account. Username may already exist.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error creating account: {e}")
+    
+    def login(self, username, password_hash):
+        """Login to an existing account by delegating to the client instance"""
+        try:
+            success = self.client.login(username, password_hash)
+            if success:
+                self.username = username
+                self.session_token = self.client.session_token
+                
+                # Update UI
+                self.user_label.setText(f"Logged in as: {username}")
+                self.stacked_widget.setCurrentWidget(self.chat_widget)
+                
+                # Start message receiver
+                self.start_message_receiver()
+                
+                # Get existing messages
+                self.get_messages()
+            else:
+                QMessageBox.warning(self, "Login Failed", "Invalid username or password")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error during login: {e}")
             
     def start_message_receiver(self):
         # Stop existing receiver if any
@@ -609,13 +645,8 @@ class ChatWindow(QMainWindow):
             return
             
         try:
-            request = chat_pb2.GetMessagesRequest(
-                username=self.username,
-                limit=self.message_count_input.value(),
-                session_token=self.session_token
-            )
-            
-            response = self.stub.GetMessages(request)
+            # Use the client's get_messages method instead of accessing the stub directly
+            messages = self.client.get_messages(self.message_count_input.value())
             
             # Clear previous messages
             self.user_messages = []
@@ -624,8 +655,8 @@ class ChatWindow(QMainWindow):
             self.message_display.clear()
             
             # Display messages
-            if response.messages:
-                for message in response.messages:
+            if messages:
+                for message in messages:
                     # Add to message IDs list
                     self.user_messages.append(message.message_id)
                     
@@ -635,10 +666,9 @@ class ChatWindow(QMainWindow):
                     
                     # Store full message data
                     self.messages_data[message.message_id] = message
-                    
-                if response.remaining_messages > 0:
-                    QMessageBox.information(self, "More Messages", 
-                                          f"You have {response.remaining_messages} more messages.")
+                
+                QMessageBox.information(self, "Messages Retrieved", 
+                                      f"Retrieved {len(messages)} messages.")
             else:
                 QMessageBox.information(self, "No Messages", "You have no messages.")
                 
@@ -661,15 +691,10 @@ class ChatWindow(QMainWindow):
                                      
         if reply == QMessageBox.Yes:
             try:
-                request = chat_pb2.DeleteMessagesRequest(
-                    username=self.username,
-                    message_ids=message_ids,
-                    session_token=self.session_token
-                )
+                # Use the client's delete_messages method instead of accessing the stub directly
+                success = self.client.delete_messages(message_ids)
                 
-                response = self.stub.DeleteMessages(request)
-                
-                if response.success:
+                if success:
                     # Fix: Use length of selected items to show the correct count
                     QMessageBox.information(self, "Success", 
                                           f"Deleted {len(message_ids)} messages.")
@@ -686,7 +711,7 @@ class ChatWindow(QMainWindow):
                     
                     self.message_display.clear()
                 else:
-                    QMessageBox.warning(self, "Deletion Failed", response.message)
+                    QMessageBox.warning(self, "Deletion Failed", "Failed to delete messages.")
                     
             except grpc.RpcError as e:
                 QMessageBox.critical(self, "Error", f"Failed to delete messages: {e}")
@@ -702,17 +727,12 @@ class ChatWindow(QMainWindow):
                                      
         if reply == QMessageBox.Yes:
             try:
-                request = chat_pb2.DeleteMessagesRequest(
-                    username=self.username,
-                    message_ids=self.user_messages,
-                    session_token=self.session_token
-                )
+                # Use the client's delete_messages method instead of accessing the stub directly
+                success = self.client.delete_messages(self.user_messages)
                 
-                response = self.stub.DeleteMessages(request)
-                
-                if response.success:
+                if success:
                     QMessageBox.information(self, "Success", 
-                                          f"Deleted {response.deleted_count} messages.")
+                                          f"Deleted {len(self.user_messages)} messages.")
                     self.message_display.clear()
                     self.message_list.clear()
                     self.user_messages = []
@@ -732,20 +752,14 @@ class ChatWindow(QMainWindow):
             return
             
         try:
-            request = chat_pb2.SendMessageRequest(
-                sender=self.username,
-                recipient=recipient,
-                content=content,
-                session_token=self.session_token
-            )
+            # Use the client's send_message method instead of accessing the stub directly
+            success = self.client.send_message(recipient, content)
             
-            response = self.stub.SendMessage(request)
-            
-            if response.success:
+            if success:
                 QMessageBox.information(self, "Success", "Message sent successfully.")
                 self.message_input.clear()
             else:
-                QMessageBox.warning(self, "Send Failed", response.message)
+                QMessageBox.warning(self, "Send Failed", "Failed to send message.")
                 
         except grpc.RpcError as e:
             QMessageBox.critical(self, "Error", f"Failed to send message: {e}")
@@ -758,18 +772,12 @@ class ChatWindow(QMainWindow):
         pattern = self.user_search_input.text()
         
         try:
-            request = chat_pb2.ListAccountsRequest(
-                pattern=pattern,
-                page=self.current_page,
-                page_size=10,
-                session_token=self.session_token
-            )
+            # Use the client's list_accounts method instead of accessing the stub directly
+            usernames = self.client.list_accounts(pattern, self.current_page)
             
-            response = self.stub.ListAccounts(request)
-            
-            # Update pagination info
-            self.current_page = response.current_page
-            self.total_pages = response.total_pages
+            # Since we're not getting pagination info directly anymore, we'll simplify pagination
+            # In a real app, you'd want to handle pagination properly based on server response
+            self.total_pages = max(1, len(usernames) // 10 + (1 if len(usernames) % 10 > 0 else 0))
             self.page_label.setText(f"Page {self.current_page} of {self.total_pages}")
             
             # Enable/disable pagination buttons
@@ -778,7 +786,7 @@ class ChatWindow(QMainWindow):
             
             # Display users
             self.users_list.clear()
-            for username in response.usernames:
+            for username in usernames:
                 self.users_list.addItem(username)
                 
         except grpc.RpcError as e:
@@ -811,19 +819,14 @@ class ChatWindow(QMainWindow):
                                              
             if ok and password:
                 try:
-                    request = chat_pb2.DeleteAccountRequest(
-                        username=self.username,
-                        password_hash=hash_password(password),
-                        session_token=self.session_token
-                    )
+                    # Use the client's delete_account method instead of accessing the stub directly
+                    success = self.client.delete_account(password)
                     
-                    response = self.stub.DeleteAccount(request)
-                    
-                    if response.success:
+                    if success:
                         QMessageBox.information(self, "Success", "Account deleted successfully.")
                         self.logout()
                     else:
-                        QMessageBox.warning(self, "Deletion Failed", response.message)
+                        QMessageBox.warning(self, "Deletion Failed", "Failed to delete account.")
                         
                 except grpc.RpcError as e:
                     QMessageBox.critical(self, "Error", f"Failed to delete account: {e}")

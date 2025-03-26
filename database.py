@@ -47,13 +47,26 @@ class DatabaseManager:
     # User operations
     def create_user(self, username: str, password_hash: str) -> bool:
         try:
+            print(f"[DATABASE] Creating user: {username}")
+            # First check if user already exists
+            existing_user = self.get_user(username)
+            if existing_user:
+                print(f"[DATABASE] User {username} already exists")
+                return False
+                
+            print(f"[DATABASE] Inserting user {username} into database")
             self.execute(
                 "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
                 (username, password_hash, int(time.time()))
             )
             self.commit()
+            print(f"[DATABASE] User {username} created successfully")
             return True
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            print(f"[DATABASE] IntegrityError creating user {username}: {e}")
+            return False
+        except Exception as e:
+            print(f"[DATABASE] Error creating user {username}: {e}")
             return False
             
     def get_user(self, username: str) -> Optional[Dict[str, Any]]:
@@ -185,7 +198,7 @@ class DatabaseManager:
         
     def get_raft_log_entry(self, index: int) -> Optional[Dict[str, Any]]:
         cursor = self.execute(
-            "SELECT * FROM raft_log WHERE index = ?",
+            "SELECT * FROM raft_log WHERE log_index = ?",
             (index,)
         )
         row = cursor.fetchone()
@@ -194,12 +207,12 @@ class DatabaseManager:
     def get_last_log_entry(self) -> Tuple[int, int]:
         """Return (index, term) of last log entry"""
         cursor = self.execute(
-            "SELECT index, term FROM raft_log ORDER BY index DESC LIMIT 1"
+            "SELECT log_index, term FROM raft_log ORDER BY log_index DESC LIMIT 1"
         )
         row = cursor.fetchone()
-        return (row['index'], row['term']) if row else (0, 0)
+        return (row['log_index'], row['term']) if row else (0, 0)
         
     def delete_logs_from(self, index: int):
         """Delete all log entries from index onwards"""
-        self.execute("DELETE FROM raft_log WHERE index >= ?", (index,))
+        self.execute("DELETE FROM raft_log WHERE log_index >= ?", (index,))
         self.commit() 

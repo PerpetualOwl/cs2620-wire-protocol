@@ -47,12 +47,20 @@ class RaftNode:
         self.stubs = {}
         self._init_stubs()
         
-        # Start election timer
-        self.election_timer = threading.Timer(
-            self._get_election_timeout() / 1000,
-            self._start_election
-        )
-        self.election_timer.start()
+        # If we're the only server, become leader immediately
+        if len(self.config.servers) == 1:
+            logger.info("Single server mode detected, becoming leader immediately")
+            self.state = NodeState.LEADER
+            self.leader_id = self.id
+            # No need for election timer in single-server mode
+            self.election_timer = None
+        else:
+            # Start election timer for multi-server mode
+            self.election_timer = threading.Timer(
+                self._get_election_timeout() / 1000,
+                self._start_election
+            )
+            self.election_timer.start()
         
     def _load_persistent_state(self):
         """Load persistent state from storage"""
@@ -184,13 +192,29 @@ class RaftNode:
     def replicate_log(self, operation_type: str, data: bytes) -> bool:
         """Replicate a log entry to followers"""
         if self.state != NodeState.LEADER:
+            logger.warning(f"Cannot replicate log: not a leader (current state: {self.state})")
             return False
             
         # Append to local log
         index = self.db.append_raft_log(self.current_term, operation_type, data)
+        logger.info(f"Appended log entry {index} of type {operation_type}")
         
-        # Replicate to followers
+        # If we're the only server, apply immediately and return success
+        if len(self.config.servers) == 1:
+            logger.info("Single server mode detected, applying log entry immediately")
+            # Apply the log entry to the state machine
+            entry = self.db.get_raft_log_entry(index)
+            if entry:
+                success = self.apply_log_entry(entry)
+                logger.info(f"Applied log entry in single server mode: {success}")
+                return success
+            else:
+                logger.error(f"Failed to retrieve log entry {index}")
+                return False
+        
+        # Replicate to followers in multi-server mode
         success_count = 1  # Count self
+        logger.info(f"Replicating to {len(self.stubs)} followers")
         for server_id, stub in self.stubs.items():
             try:
                 request = raft_pb2.LogEntry(
@@ -202,31 +226,49 @@ class RaftNode:
                 response = stub.ReplicateLog(request)
                 if response.success:
                     success_count += 1
-            except grpc.RpcError:
+                    logger.info(f"Server {server_id} successfully replicated log entry")
+                else:
+                    logger.warning(f"Server {server_id} failed to replicate log entry")
+            except grpc.RpcError as e:
+                logger.error(f"Error replicating to server {server_id}: {e}")
                 continue
                 
         # Check if we got majority
-        return success_count > len(self.config.servers) / 2
+        majority = success_count > len(self.config.servers) / 2
+        logger.info(f"Replication result: {success_count}/{len(self.config.servers)} servers, majority: {majority}")
+        return majority
         
     def apply_log_entry(self, entry: Dict) -> bool:
         """Apply a log entry to the state machine"""
         try:
+            logger.info(f"Applying log entry: {entry['operation_type']}")
             # Apply the operation based on type
             if entry['operation_type'] == 'CREATE_USER':
                 data = entry['data'].decode()
+                logger.info(f"Decoded data: {data}")
                 username, password_hash = data.split(':')
-                return self.db.create_user(username, password_hash)
+                logger.info(f"Creating user: {username}")
+                result = self.db.create_user(username, password_hash)
+                logger.info(f"User creation result: {result}")
+                return result
             elif entry['operation_type'] == 'DELETE_USER':
                 username = entry['data'].decode()
-                return self.db.delete_user(username)
+                logger.info(f"Deleting user: {username}")
+                result = self.db.delete_user(username)
+                logger.info(f"User deletion result: {result}")
+                return result
             elif entry['operation_type'] == 'SAVE_MESSAGE':
                 data = entry['data'].decode()
                 msg_id, sender, recipient, content, timestamp = data.split(':')
-                return self.db.save_message(
+                logger.info(f"Saving message from {sender} to {recipient}")
+                result = self.db.save_message(
                     msg_id, sender, recipient, content, int(timestamp)
                 )
+                logger.info(f"Message save result: {result}")
+                return result
             elif entry['operation_type'] == 'DELETE_MESSAGES':
                 message_ids = entry['data'].decode().split(',')
+                logger.info(f"Deleting messages: {message_ids}")
                 self.db.delete_messages(message_ids)
                 return True
             else:
@@ -234,6 +276,7 @@ class RaftNode:
                 return False
         except Exception as e:
             logger.error(f"Error applying log entry: {e}")
+            logger.exception("Detailed exception information:")
             return False
             
 class RaftService(raft_pb2_grpc.RaftServiceServicer):
