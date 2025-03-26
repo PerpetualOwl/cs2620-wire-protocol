@@ -92,12 +92,14 @@ class RaftNode:
         
     def _reset_election_timer(self):
         """Reset the election timer"""
-        self.election_timer.cancel()
-        self.election_timer = threading.Timer(
-            self._get_election_timeout() / 1000,
-            self._start_election
-        )
-        self.election_timer.start()
+        # Only reset if we have an election timer (not in single-server mode)
+        if self.election_timer is not None:
+            self.election_timer.cancel()
+            self.election_timer = threading.Timer(
+                self._get_election_timeout() / 1000,
+                self._start_election
+            )
+            self.election_timer.start()
         
     def _start_election(self):
         """Start a new election"""
@@ -187,7 +189,9 @@ class RaftNode:
             self.state = NodeState.FOLLOWER
             self.voted_for = None
             self._save_persistent_state()
-            self._reset_election_timer()
+            # Only reset election timer if we're not in single-server mode
+            if len(self.config.servers) > 1:
+                self._reset_election_timer()
             
     def replicate_log(self, operation_type: str, data: bytes) -> bool:
         """Replicate a log entry to followers"""
