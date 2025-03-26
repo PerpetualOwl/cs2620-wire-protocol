@@ -1,3 +1,4 @@
+import certifi
 import grpc
 import random
 import threading
@@ -43,8 +44,12 @@ class RaftNode:
         self.peer_addresses = {s.id: s.address for s in config.server_list if s.id != self.id}
         print(self.peer_addresses)
         self.stubs = {}
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         for peer_id, addr in self.peer_addresses.items():
-            channel = grpc.insecure_channel(addr)
+            channel = grpc.secure_channel(addr, credentials=credentials)
             self.stubs[peer_id] = raft_pb2_grpc.RaftServiceStub(channel)
 
         # Election timer: if single server, become leader immediately.

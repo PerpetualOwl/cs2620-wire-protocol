@@ -1,4 +1,5 @@
 import sys
+import certifi
 import grpc
 import hashlib
 import threading
@@ -37,10 +38,14 @@ class MessageReceiver(QThread):
         self.running = True
         
     def run(self):
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         for server in self.config.server_list:
             print(server)
             try:
-                channel = grpc.insecure_channel(server.client_address)
+                channel = grpc.secure_channel(server.client_address, credentials=credentials)
                 stub = chat_pb2_grpc.ChatServiceStub(channel)
                 request = chat_pb2.ReceiveMessagesRequest(
                     username=self.username,
@@ -130,10 +135,14 @@ class ChatClient:
     def _connect_to_server(self) -> bool:
         """Connect to an available server"""
         # First try a random server
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         random_server = self.config.get_random_server()
         if random_server:
             try:
-                channel = grpc.insecure_channel(random_server.client_address)
+                channel = grpc.secure_channel(random_server.client_address, credentials=credentials)
                 stub = chat_pb2_grpc.ChatServiceStub(channel)
                 # Try a simple request to check if server is responsive
                 stub.ListAccounts(chat_pb2.ListAccountsRequest(
@@ -151,9 +160,13 @@ class ChatClient:
                 # Fall back to trying all servers
         
         # If random server failed or wasn't available, try all servers
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         for server in self.config.server_list:
             try:
-                channel = grpc.insecure_channel(server.client_address)
+                channel = grpc.secure_channel(server.client_address, credentials=credentials)
                 stub = chat_pb2_grpc.ChatServiceStub(channel)
                 # Try a simple request to check if server is responsive
                 stub.ListAccounts(chat_pb2.ListAccountsRequest(
@@ -544,10 +557,13 @@ class ChatWindow(QMainWindow):
         
     def connect_to_server(self):
         server_address = self.server_input.text()
-        
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         try:
             # Create gRPC channel
-            self.channel = grpc.insecure_channel(server_address)
+            self.channel = grpc.secure_channel(server_address, credentials=credentials)
             self.stub = chat_pb2_grpc.ChatServiceStub(self.channel)
             self.stub = self.client.stub
             
