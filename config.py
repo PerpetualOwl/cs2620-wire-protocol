@@ -1,5 +1,10 @@
 import os
+import random
 from typing import Dict, List
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 class ServerConfig:
     def __init__(self, id: str, host: str, port: int):
@@ -17,17 +22,15 @@ class ServerConfig:
         return f"{self.host}:{self.client_port}"
 
 class Config:
-    def __init__(self):
+    def __init__(self, num_servers=5):
         # Default configuration for local testing
-        self.servers: Dict[str, ServerConfig] = {
-            "server1": ServerConfig("server1", "localhost", 50051),
-            "server2": ServerConfig("server2", "localhost", 50052),
-            "server3": ServerConfig("server3", "localhost", 50053),
-        }
+        self.servers: Dict[str, ServerConfig] = {}
+        for i in range(1, num_servers+1):
+            self.servers["server"+str(i)] = ServerConfig("server" + str(i), "localhost", 50050 + i)
         
         # Election timeout range in milliseconds
-        self.election_timeout_min = 150
-        self.election_timeout_max = 300
+        self.election_timeout_min = 500
+        self.election_timeout_max = 1000
         
         # Heartbeat interval in milliseconds
         self.heartbeat_interval = 50
@@ -40,13 +43,14 @@ class Config:
         
     def _load_from_env(self):
         """Load configuration from environment variables"""
-        # Override server configurations if provided
-        server_list = os.getenv("CHAT_SERVERS")
-        if server_list:
-            self.servers.clear()
-            for server_config in server_list.split(","):
-                id, host, port = server_config.split(":")
-                self.servers[id] = ServerConfig(id, host, int(port))
+        # Load individual server configurations
+        for i in range(1, 6):  # Support up to 5 servers
+            server_id = f"server{i}"
+            server_ip = os.getenv(f"SERVER{i}_IP")
+            if server_ip:
+                # Use the standard port for this server ID
+                port = 50050 + i
+                self.servers[server_id] = ServerConfig(server_id, server_ip, port)
                 
         # Override timeouts if provided
         if os.getenv("ELECTION_TIMEOUT_MIN"):
@@ -69,4 +73,10 @@ class Config:
         
     def get_db_path(self, server_id: str) -> str:
         """Get the database path for a specific server"""
-        return os.path.join(self.db_directory, f"{server_id}.db") 
+        return os.path.join(self.db_directory, f"{server_id}.db")
+        
+    def get_random_server(self) -> ServerConfig:
+        """Get a random server from the available servers"""
+        if not self.servers:
+            return None
+        return random.choice(list(self.servers.values()))

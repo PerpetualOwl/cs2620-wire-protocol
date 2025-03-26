@@ -1,4 +1,5 @@
 import sys
+import certifi
 import grpc
 import hashlib
 import threading
@@ -29,28 +30,38 @@ class MessageReceiver(QThread):
     """Thread for receiving messages from the server"""
     message_received = pyqtSignal(object)
     
-    def __init__(self, stub, username, session_token):
+    def __init__(self, config, username, session_token):
         super().__init__()
-        self.stub = stub
+        self.config = config
         self.username = username
         self.session_token = session_token
         self.running = True
         
     def run(self):
-        try:
-            request = chat_pb2.ReceiveMessagesRequest(
-                username=self.username,
-                session_token=self.session_token
-            )
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
+        for server in self.config.server_list:
+            print(server)
+            try:
+                channel = grpc.insecure_channel(server.client_address)
+                stub = chat_pb2_grpc.ChatServiceStub(channel)
+                request = chat_pb2.ReceiveMessagesRequest(
+                    username=self.username,
+                    session_token=self.session_token
+                )
+                
+                for message in stub.ReceiveMessages(request):
+                    if not self.running:
+                        break
+                    self.message_received.emit(message)
+            except grpc.RpcError as e:
+                print(f"gRPC Error in message receiver: {e}")
+            except Exception as e:
+                print(f"Error in message receiver: {e}")
+        print("FUCK")
             
-            for message in self.stub.ReceiveMessages(request):
-                if not self.running:
-                    break
-                self.message_received.emit(message)
-        except grpc.RpcError as e:
-            print(f"gRPC Error in message receiver: {e}")
-        except Exception as e:
-            print(f"Error in message receiver: {e}")
             
     def stop(self):
         self.running = False
@@ -123,6 +134,36 @@ class ChatClient:
         
     def _connect_to_server(self) -> bool:
         """Connect to an available server"""
+        # First try a random server
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
+        random_server = self.config.get_random_server()
+        if random_server:
+            try:
+                channel = grpc.insecure_channel(random_server.client_address)
+                stub = chat_pb2_grpc.ChatServiceStub(channel)
+                # Try a simple request to check if server is responsive
+                stub.ListAccounts(chat_pb2.ListAccountsRequest(
+                    session_token="test",
+                    pattern="",
+                    page=1,
+                    page_size=1
+                ))
+                self.current_server = random_server
+                self.stub = stub
+                logger.info(f"Connected to server at {random_server.client_address}")
+                return True
+            except grpc.RpcError as e:
+                logger.info(f"Failed to connect to random server: {e}")
+                # Fall back to trying all servers
+        
+        # If random server failed or wasn't available, try all servers
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         for server in self.config.server_list:
             try:
                 channel = grpc.insecure_channel(server.client_address)
@@ -138,7 +179,8 @@ class ChatClient:
                 self.stub = stub
                 logger.info(f"Connected to server at {server.client_address}")
                 return True
-            except grpc.RpcError:
+            except grpc.RpcError as e:
+                logger.info(f"Failed to connect to server {server.id}: {e}")
                 continue
         return False
         
@@ -309,6 +351,7 @@ class ChatWindow(QMainWindow):
     def __init__(self, config: Config):
         super().__init__()
         self.client = ChatClient(config)
+        self.config = config
         self.message_receiver = None
         self.init_ui()
         
@@ -514,11 +557,15 @@ class ChatWindow(QMainWindow):
         
     def connect_to_server(self):
         server_address = self.server_input.text()
-        
+        with open(certifi.where(), "rb") as f:
+            trusted_certs = f.read()
+        # Create secure channel credentials using the trusted certificates
+        credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
         try:
             # Create gRPC channel
             self.channel = grpc.insecure_channel(server_address)
             self.stub = chat_pb2_grpc.ChatServiceStub(self.channel)
+            self.stub = self.client.stub
             
             # Show login dialog
             login_dialog = LoginDialog(self)
@@ -578,7 +625,7 @@ class ChatWindow(QMainWindow):
             self.message_receiver.wait()
             
         # Start new receiver
-        self.message_receiver = MessageReceiver(self.stub, self.username, self.session_token)
+        self.message_receiver = MessageReceiver(self.config, self.username, self.session_token)
         self.message_receiver.message_received.connect(self.handle_new_message)
         self.message_receiver.start()
         
@@ -840,7 +887,7 @@ def main():
     app = QApplication(sys.argv)
     
     # Load configuration
-    config = Config()
+    config = Config(3)
     if len(sys.argv) > 1:
         # TODO: Load config from file
         pass
